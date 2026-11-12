@@ -89,10 +89,14 @@ def invalidate_cache() -> None:
 
 
 def _target(tutor: str = "") -> tuple[str, str]:
+    """Куда писать занятие.
+
+    Данил Пудов / Вика — в свой лист «История Данил» / «История Вика».
+    Все остальные репетиторы — в «Чеки Репет» → лист «Чеки».
+    """
     cfg = load_config()
-    if _write_cfg().get("target", "recept") == "history":
-        sheet = sheet_for_tutor(tutor) if tutor else (
-            _write_cfg().get("history_sheet") or TARGET_HISTORY_SHEET)
+    sheet = sheet_for_tutor(tutor) if tutor else PERSONAL_SHEETS["Данил Пудов"]
+    if sheet in PERSONAL_SHEETS.values():
         return cfg["sheets"]["history"], sheet
     return cfg["sheets"]["recept"], cfg["sheets"]["recept_checks_sheet"]
 
@@ -104,11 +108,14 @@ def target_name() -> str:
     return f"«Чеки Репет» / {cfg['sheets']['recept_checks_sheet']}"
 
 
-def ensure_target_sheet(title: str | None = None) -> str:
-    """Создаёт лист назначения с заголовком, если его нет."""
+def ensure_target_sheet(title: str | None = None,
+                        sh_id: str | None = None) -> str:
+    """Создать лист назначения с заголовком, если его нет."""
     from sheets_util import sheets
-    sh_id, default_title = _target()
-    title = title or default_title
+    if sh_id is None:
+        sh_id, default_title = _target()
+        title = title or default_title
+    title = title or "Чеки"
     meta = sheets().spreadsheets().get(spreadsheetId=sh_id).execute()
     titles = [s["properties"]["title"] for s in meta.get("sheets", [])]
     if title not in titles:
@@ -118,10 +125,15 @@ def ensure_target_sheet(title: str | None = None) -> str:
         update_values(sh_id, f"'{title}'!A1:L1", [HEADER])
         log(f"Создан лист «{title}»")
     else:
-        cur = get_values(sh_id, f"'{title}'!A1:L1")
-        if not cur or len(cur[0]) < 12:
-            update_values(sh_id, f"'{title}'!A1:L1", [HEADER])
+        # Шапка может быть защищена владельцем таблицы — не ломаем запись.
+        try:
+            cur = get_values(sh_id, f"'{title}'!A1:L1")
+            if not cur or len(cur[0]) < 12:
+                update_values(sh_id, f"'{title}'!A1:L1", [HEADER])
+        except Exception as e:  # noqa: BLE001
+            log(f"Шапка «{title}» не обновлена (защита?): {e}")
     return title
+
 
 
 # --------------------------------------------------------------------------- #
@@ -148,10 +160,13 @@ def next_lesson_id(title: str | None = None) -> int:
     return int(prefix + str(mx + 1))
 
 
-def find_next_free_row(title: str | None = None) -> int:
+def find_next_free_row(title: str | None = None,
+                       sh_id: str | None = None) -> int:
     """Строка после ПОСЛЕДНЕЙ занятой (пустые строки в середине не занимаем)."""
-    sh_id, default_title = _target()
-    title = title or default_title
+    if sh_id is None:
+        sh_id, default_title = _target()
+        title = title or default_title
+    title = title or "Чеки"
     try:
         rows = get_values(sh_id, f"'{title}'!A1:L")
     except Exception:  # noqa: BLE001 — листа ещё нет
@@ -160,7 +175,7 @@ def find_next_free_row(title: str | None = None) -> int:
     for n, row in enumerate(rows, start=1):
         if n < FIRST_DATA_ROW:
             continue
-        if any(_cell(row, i) for i in range(12)):  # занята, если есть хоть что-то в A..L
+        if any(_cell(row, i) for i in range(12)):  # занята, если что-то в A..L
             last = n
     return max(last + 1, FIRST_DATA_ROW)
 
@@ -216,9 +231,9 @@ def append_check(record: dict) -> int:
     """Дописывает занятие в свободную строку. Возвращает номер строки."""
     tutor = record.get("репетитор", "")
     sh_id, title = _target(tutor)
-    ensure_target_sheet(title)
+    ensure_target_sheet(title, sh_id)
 
-    row_num = find_next_free_row(title)
+    row_num = find_next_free_row(title, sh_id)
     _lid = str(next_lesson_id(title))
     values = [[
         record.get("время", ""),
@@ -250,10 +265,18 @@ def append_check(record: dict) -> int:
         log(f"Не удалось оформить строку {row_num}: {e}")
 
     log(f"CHECK записан в «{title}» строку {row_num}: {values[0]}")
-    try:
-        set_lesson_paid(_lid, bool(record.get("оплачено")))
-    except Exception as e:  # noqa: BLE001
-        log(f"Не удалось покрасить сумму: {e}")
+    # Красим только при явном подтверждении оплаты.
+    # Иначе оставляем белым — «не проверено».
+    if record.get("оплачено") is True:
+        try:
+            set_lesson_paid(_lid, True, title=title)
+        except Exception as e:  # noqa: BLE001
+            log(f"Не удалось покрасить сумму в зелёный: {e}")
+    elif record.get("оплачено") is False:
+        try:
+            set_lesson_paid(_lid, False, title=title)
+        except Exception as e:  # noqa: BLE001
+            log(f"Не удалось покрасить сумму в красный: {e}")
     return row_num
 
 
@@ -347,38 +370,46 @@ def _find_lesson_row(lesson_id, title: str | None = None) -> int | None:
     return None
 
 
-def _all_lesson_sheets() -> list[str]:
-    """Все листы с занятиями: Занятия, История, История Данил/Вика."""
+def _all_sheet_targets() -> list[tuple[str, str]]:
+    """Все места, где лежат занятия: [(id таблицы, лист)]."""
     from sheets_util import sheets
     cfg = load_config()
-    sh_id = cfg["sheets"]["history"]
+    hist_id = cfg["sheets"]["history"]
+    out: list[tuple[str, str]] = []
     try:
-        meta = sheets().spreadsheets().get(spreadsheetId=sh_id).execute()
+        meta = sheets().spreadsheets().get(spreadsheetId=hist_id).execute()
         titles = [s["properties"]["title"] for s in meta.get("sheets", [])]
     except Exception:  # noqa: BLE001
-        return []
+        titles = []
     personal = [t for t in titles if t in ("История Данил", "История Вика")]
     others = [t for t in titles
               if (t == "Занятия" or t == "История" or t.startswith("История "))
               and t not in personal]
-    return personal + others
+    for t in personal + others:
+        out.append((hist_id, t))
+    # «Чеки Репет» → «Чеки» (основной лист репетиторов)
+    out.append((cfg["sheets"]["recept"], cfg["sheets"]["recept_checks_sheet"]))
+    return out
+
+
+def _all_lesson_sheets() -> list[str]:
+    """Названия листов с занятиями (для совместимости)."""
+    return [t for _, t in _all_sheet_targets()]
 
 
 def _find_lesson_anywhere(lesson_id) -> tuple[str, str, int] | None:
-    """Найти (sh_id, title, row) занятия по ID во всех листах."""
-    cfg = load_config()
-    hist_id = cfg["sheets"]["history"]
+    """Найти (id таблицы, лист, строка) занятия по ID во всех листах."""
     lid = str(lesson_id).strip()
-    for title in _all_lesson_sheets():
+    for sh_id, title in _all_sheet_targets():
         try:
-            rows = get_values(hist_id, f"'{title}'!A1:L")
+            rows = get_values(sh_id, f"'{title}'!A1:L")
         except Exception:  # noqa: BLE001
             continue
         for n, row in enumerate(rows, start=1):
             if n == 1 or len(row) <= 11:
                 continue
             if str(row[11]).strip() == lid:
-                return hist_id, title, n
+                return sh_id, title, n
     return None
 
 
@@ -386,10 +417,10 @@ def set_lesson_paid(lesson_id, paid: bool, title: str | None = None) -> bool:
     """Покрасить сумму занятия (колонка F): зелёный = подтверждено."""
     found = None
     if title:
-        cfg = load_config()
+        sh, t = _sheet_spreadsheet(title)
         row_num = _find_row_by_lesson_id(lesson_id, title)
         if row_num:
-            found = (cfg["sheets"]["history"], title, row_num)
+            found = (sh, t, row_num)
     if not found:
         found = _find_lesson_anywhere(lesson_id)
     if not found:
@@ -702,11 +733,10 @@ def read_lessons(include_history: bool = False,
         titles = []
     # личные листы (История Данил / История Вика) — в приоритете
     personal = [t for t in titles if t in ("История Данил", "История Вика")]
-    common = [t for t in titles if t == "Занятия"]
     other = [t for t in titles
              if (t.startswith("История ") or t == "История")
              and t not in personal]
-    lesson_sheets = personal + common + other
+    lesson_sheets = personal + other
     if not lesson_sheets:
         lesson_sheets = [_write_cfg().get("history_sheet") or TARGET_HISTORY_SHEET]
     lessons: list[dict] = []
@@ -715,18 +745,18 @@ def read_lessons(include_history: bool = False,
             x["лист"] = t
             lessons.append(x)
 
-    if with_checks:
-        try:
-            ensure_checks_ids()
-        except Exception as e:  # noqa: BLE001
-            log(f"ID в «Чеках» не проставлены: {e}")
-        try:
-            for x in _rows_from(cfg["sheets"]["recept"],
-                                cfg["sheets"]["recept_checks_sheet"]):
-                x["лист"] = "Чеки"
-                lessons.append(x)
-        except Exception as e:  # noqa: BLE001
-            log(f"Не прочитал «Чеки»: {e}")
+    # «Чеки» — основной лист занятий репетиторов, читаем всегда
+    try:
+        ensure_checks_ids()
+    except Exception as e:  # noqa: BLE001
+        log(f"ID в «Чеках» не проставлены: {e}")
+    try:
+        for x in _rows_from(cfg["sheets"]["recept"],
+                            cfg["sheets"]["recept_checks_sheet"]):
+            x["лист"] = "Чеки"
+            lessons.append(x)
+    except Exception as e:  # noqa: BLE001
+        log(f"Не прочитал «Чеки»: {e}")
 
     if include_history:
         hist_sheet = cfg["sheets"]["history_sheet"]
@@ -747,10 +777,18 @@ def read_lessons(include_history: bool = False,
     return _cache_put(key, unique)
 
 
-def _find_row_by_lesson_id(lesson_id: str, title: str | None = None) -> int | None:
+def _sheet_spreadsheet(title: str | None) -> tuple[str, str]:
+    """(id таблицы, лист) для известного названия листа."""
     cfg = load_config()
-    sh_id = cfg["sheets"]["history"]
     title = title or (_write_cfg().get("history_sheet") or TARGET_HISTORY_SHEET)
+    if title == cfg["sheets"]["recept_checks_sheet"]:
+        return cfg["sheets"]["recept"], title
+    return cfg["sheets"]["history"], title
+
+
+def _find_row_by_lesson_id(lesson_id: str,
+                           title: str | None = None) -> int | None:
+    sh_id, title = _sheet_spreadsheet(title)
     try:
         rows = get_values(sh_id, f"'{title}'!A1:L")
     except Exception:  # noqa: BLE001
@@ -769,10 +807,10 @@ def update_lesson(lesson_id: str, record: dict,
     """Перезаписать строку занятия по ID (A..L, с родителем)."""
     found = None
     if title:
-        cfg = load_config()
+        sh, t = _sheet_spreadsheet(title)
         row_num = _find_row_by_lesson_id(lesson_id, title)
         if row_num:
-            found = (cfg["sheets"]["history"], title, row_num)
+            found = (sh, t, row_num)
     if not found:
         found = _find_lesson_anywhere(lesson_id)
     if not found:
@@ -803,10 +841,10 @@ def delete_lesson(lesson_id: str, title: str | None = None) -> bool:
     from sheets_util import clear_values
     found = None
     if title:
-        cfg = load_config()
+        sh, t = _sheet_spreadsheet(title)
         row_num = _find_row_by_lesson_id(lesson_id, title)
         if row_num:
-            found = (cfg["sheets"]["history"], title, row_num)
+            found = (sh, t, row_num)
     if not found:
         found = _find_lesson_anywhere(lesson_id)
     if not found:
