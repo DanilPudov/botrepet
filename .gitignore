@@ -1,0 +1,26 @@
+# секреты — НЕ в git (загружаются через файловый менеджер в /app/data)
+service_account.json
+service_account*.json
+*.pem
+*.key
+state.json
+state.backup*.json
+
+# состояние и логи
+bot.log
+messages.log
+update_note.txt
+bot.lock
+*.log
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+pkgs/
+python/
+.pytest_cache/
+
+# служебное
+.git/
