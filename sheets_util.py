@@ -160,7 +160,8 @@ def _retry_429(func, *args, **kwargs):
     """Повтор при превышении квоты Google (429) с паузой."""
     import time as _t
     last = None
-    for attempt in range(4):
+    # короткие паузы: синхронный sleep блокирует весь бот (event loop)
+    for attempt in range(3):
         try:
             return func(*args, **kwargs)
         except Exception as e:  # noqa: BLE001
@@ -168,7 +169,8 @@ def _retry_429(func, *args, **kwargs):
             if "429" not in msg and "quota" not in msg.lower():
                 raise
             last = e
-            _t.sleep(1.5 * (attempt + 1))
+            if attempt < 2:
+                _t.sleep(0.4 * (attempt + 1))
     raise last
 
 
@@ -264,11 +266,41 @@ def fmt_date_ru(d: dt.date) -> str:
 
 
 def parse_amount(text: str) -> int | None:
-    """'1 700' / '1700₽' / '1500.0' -> int, иначе None."""
-    clean = "".join(ch for ch in str(text) if ch.isdigit())
-    if not clean:
+    """Сумма из текста: '1 700' / '1700₽' / '1500.0' / '1 700,50' -> int.
+
+    Раньше вырезались все нецифры: «1500.0» → 15000 (в 10 раз больше!).
+    Теперь дробная часть отбрасывается корректно.
+    """
+    s = str(text or "")
+    for ch in ("\u00a0", " ", "\t", "₽", "р", "Р", "$", "€"):
+        s = s.replace(ch, "")
+    if not s:
         return None
-    val = int(clean)
+    # «1.700,50»: точка — разделитель тысяч, запятая — десятичная
+    if "," in s and "." in s:
+        last_dot, last_comma = s.rfind("."), s.rfind(",")
+        if last_comma > last_dot:
+            s = s.replace(".", "").replace(",", ".")
+        else:
+            s = s.replace(",", "")          # «1,700.50»
+    elif "," in s:
+        s = s.replace(",", ".")
+    elif s.count(".") > 1:
+        s = s.replace(".", "")              # «1.700.500» — разряды
+    elif "." in s:
+        head, _, tail = s.partition(".")
+        # «1.700» — это 1700, а «1500.0» — 1500
+        if len(tail) == 3 and tail.isdigit() and head.isdigit():
+            s = head + tail
+    # оставить только цифры, точку и минус
+    s = "".join(ch for ch in s if ch.isdigit() or ch in ".-")
+    if not s or s in (".", "-", "-."):
+        return None
+    try:
+        val = float(s)
+    except ValueError:
+        return None
+    val = int(round(val))           # дробную часть отбрасываем
     if not (0 < val <= 1_000_000):
         return None
     return val
@@ -282,17 +314,22 @@ def _name_words(name: str) -> list[str]:
     return [w for w in s.split() if len(w) >= 2]
 
 
+def _fold(name: str) -> str:
+    """Имя для сравнения: нижний регистр, ё → е."""
+    return norm_name(name).lower().replace("\u0451", "\u0435")
+
+
 def names_match(a: str, b: str) -> bool:
     """Совпадают ли имена людей, даже если порядок слов разный.
 
-    «Рома Жлобич» == «Жлобич Рома», «Роман Жлобич» ≈ «Рома Жлобич».
+    «Рома Жлобич» == «Жлобич Рома», «Пётр» == «Петр».
     """
-    na, nb = norm_name(a), norm_name(b)
+    na, nb = _fold(a), _fold(b)
     if not na or not nb:
         return False
     if na == nb:
         return True
-    wa, wb = _name_words(a), _name_words(b)
+    wa, wb = _name_words(_fold(a)), _name_words(_fold(b))
     if not wa or not wb:
         return False
     if set(wa) == set(wb):
