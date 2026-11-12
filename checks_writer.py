@@ -1056,18 +1056,32 @@ def update_lesson(lesson_id: str, record: dict,
     if not found:
         return False
     sh_id, sheet_title, row = found
+    # если поле не передано — оставляем как было в таблице
+    try:
+        old = get_values(sh_id, f"'{sheet_title}'!A{row}:L{row}")
+        old = old[0] if old else []
+    except Exception:  # noqa: BLE001
+        old = []
+
+    def _keep(key: str, idx: int, default: str = "") -> str:
+        if key in record and record.get(key) is not None:
+            return str(record.get(key, ""))
+        if len(old) > idx and str(old[idx]).strip():
+            return str(old[idx])
+        return default
+
     values = [[
-        record.get("время", ""),
-        record.get("дата", ""),
-        record.get("репетитор", ""),
-        record.get("ученик", ""),
-        record.get("родитель", ""),
-        record.get("сумма", ""),
-        record.get("комментарий", ""),
-        record.get("первое", "нет"),
-        record.get("как_прошло", "Отлично"),
-        record.get("будут", "Да"),
-        record.get("комиссия", ""),
+        _keep("время", 0),
+        _keep("дата", 1),
+        _keep("репетитор", 2),
+        _keep("ученик", 3),
+        _keep("родитель", 4),
+        _keep("сумма", 5),
+        _keep("комментарий", 6),
+        _keep("первое", 7, "нет"),
+        _keep("как_прошло", 8, "Отлично"),
+        _keep("будут", 9, "Да"),
+        _keep("комиссия", 10),
         str(lesson_id),
     ]]
     update_values(sh_id, f"'{sheet_title}'!A{row}:L{row}", values)
