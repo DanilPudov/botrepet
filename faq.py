@@ -59,7 +59,11 @@ def add_entry(question: str, answer: str = "") -> int:
     cfg = load_config()
     sh_id = cfg["sheets"]["history"]
     values = get_values(sh_id, f"'{SHEET}'!A1:B") or []
-    row = max(len(values) + 1, 2)
+    last = 1
+    for n, r in enumerate(values, 1):
+        if n >= 2 and any(str(c).strip() for c in r):
+            last = n
+    row = last + 1
     update_values(sh_id, f"'{SHEET}'!A{row}:B{row}",
                   [[question, answer]])
     log(f"FAQ добавлен вопрос в строку {row}")
