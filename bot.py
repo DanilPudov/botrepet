@@ -241,6 +241,7 @@ def kb_more(user_id: int) -> InlineKeyboardMarkup:
         [("📆 Предыдущие 2 недели", "pastweek")],
         [("💡 Предложить улучшение", "suggest")],
         [("✏️ Изменить имя", "rename"), ("❓ FAQ", "faq")],
+        [("🎨 Цвет моего имени", "tcolor")],
     ]
     if role_of(user_id) == OWNER:
         if view_as_name(user_id):
@@ -1388,6 +1389,30 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_owner_picker(update, context)
         return
 
+    if data == "tcolor":
+        await q.answer()
+        p = get_pending(user.id) or {}
+        p["шаг"] = "цвет_репетитора"
+        p["репетитор"] = name_by_id(user.id) or ""
+        set_pending(user.id, p)
+        try:
+            cur = checks_writer.get_tutor_color(p["репетитор"])
+        except Exception:  # noqa: BLE001
+            cur = None
+        cur_txt = ("\nСейчас: задан." if cur else "")
+        await q.edit_message_text(
+            "🎨 <b>Цвет имени репетитора</b>\n\n"
+            "Этот цвет будет у вашего имени в таблице занятий — "
+            "и в новых записях, и в уже существующих." + cur_txt + "\n\n"
+            "Напишите цвет названием или HEX-кодом:\n"
+            "• <code>красный</code>, <code>синий</code>, <code>зелёный</code>\n"
+            "• <code>#FF0000</code> или <code>FF0000</code>\n\n"
+            "Названия: белый, чёрный, красный, зелёный, синий, голубой, "
+            "жёлтый, оранжевый, фиолетовый, розовый, серый.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb([[("Отменить", "menu")]]))
+        return
+
     if data == "pastweek":
         await q.answer()
         await show_past_week(update, context)
@@ -1512,7 +1537,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Что сделать с записью?",
             reply_markup=kb([
                 [("✏️ Изменить сумму", f"msum:{lid}")],
-                [("🎨 Цвет имени", f"mcolor:{lid}")],
+                [("🎨 Цвет ученика", f"mcolor:{lid}")],
                 [("🔁 Перенести", f"mres:{lid}")],
                 [("🗑 Удалить", f"mdel:{lid}")],
                 [("⬅️ Назад", "mine:edit")],
@@ -1526,7 +1551,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
              "репетитор": name_by_id(user.id) or ""}
         set_pending(user.id, p)
         await q.edit_message_text(
-            "🎨 <b>Цвет имени ученика</b>\n\n"
+            "🎨 <b>Цвет имени ученика</b> (в этой записи)\n\n"
             "Напишите цвет названием или HEX-кодом:\n"
             "• <code>красный</code>, <code>синий</code>, <code>зелёный</code>\n"
             "• <code>#FF0000</code> или <code>FF0000</code>\n\n"
@@ -2556,11 +2581,22 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         "Если это дубль — удалите лишнее в «Текущих 2 неделях».")
         except Exception:  # noqa: BLE001
             pass
+        # ID только что записанного занятия — для смены цвета имени
+        new_id = ""
+        try:
+            rowvals = checks_writer.get_row_lids(row)
+            new_id = rowvals
+        except Exception:  # noqa: BLE001
+            new_id = ""
+        color_btn = ([[("🎨 Цвет ученика", f"mcolor:{new_id}")]]
+                     if new_id else [])
         await q.edit_message_text(
             f"✅ Записано в таблицу, строка {row} ({where}).\n\n"
             f"{p['репетитор']} — {p['ученик']} — {p['сумма']} ₽ ({p['дата']}{tm})"
             + note,
-            reply_markup=kb([[("Записать ещё", "new")], [("Меню", "menu")]]))
+            reply_markup=kb(color_btn
+                            + [[("Записать ещё", "new")],
+                               [("Меню", "menu")]]))
         return
 
     if data == "redo":
@@ -3354,6 +3390,27 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"Занятие в расписании помечено как перенесённое "
                     f"(#{eid}) и после этой даты исчезнет.",
                     reply_markup=kb([[("⬅️ Текущие 2 недели", "mine")]]))
+        return
+
+    # --- цвет имени репетитора (для всех его занятий)
+    if step == "цвет_репетитора":
+        tutor_nm = p.get("репетитор") or name_by_id(user.id) or ""
+        try:
+            ok, count = checks_writer.set_tutor_color(tutor_nm, text)
+        except Exception as e:  # noqa: BLE001
+            log(f"Ошибка цвета репетитора: {e}")
+            ok, count = False, 0
+        set_pending(user.id, None)
+        if ok:
+            await _send(update,
+                        f"🎨 Цвет имени изменён. Покрашено строк: {count}.\n"
+                        "Новые записи будут в этом цвете автоматически.",
+                        reply_markup=kb([[("🏠 Домой", "menu")]]))
+        else:
+            await _send(update,
+                        "Не понял цвет. Напишите название (красный, синий…) "
+                        "или HEX-код вида #FF0000.",
+                        reply_markup=kb([[("🏠 Домой", "menu")]]))
         return
 
     # --- цвет имени ученика в записи
