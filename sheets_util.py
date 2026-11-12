@@ -172,20 +172,62 @@ def _retry_429(func, *args, **kwargs):
     raise last
 
 
+# Кэш прочитанных диапазонов: один экран бота делает 5-9 одинаковых
+# чтений одних и тех же листов. TTL короткий, при записи кэш сбрасывается.
+_VALUES_CACHE: dict = {}
+_VALUES_TTL = 20.0
+
+
+def invalidate_values_cache() -> None:
+    _VALUES_CACHE.clear()
+
+
 def get_values(spreadsheet_id: str, range_: str) -> list[list[str]]:
+    import time as _t
+    key = (spreadsheet_id, range_)
+    hit = _VALUES_CACHE.get(key)
+    if hit is not None and _t.time() - hit[0] < _VALUES_TTL:
+        return hit[1]
     resp = _retry_429(
         lambda: (sheets()
                  .spreadsheets()
                  .values()
                  .get(spreadsheetId=spreadsheet_id, range=range_)
                  .execute()))
-    return resp.get("values", [])
+    out = resp.get("values", [])
+    _VALUES_CACHE[key] = (_t.time(), out)
+    return out
+
+
+_BATCH_CACHE: dict = {}
+
+
+def get_values_batch(spreadsheet_id: str,
+                     ranges: list[str]) -> list[list[list[str]]]:
+    """Несколько диапазонов одной таблицы за ОДИН запрос к Google."""
+    import time as _t
+    key = (spreadsheet_id, tuple(ranges))
+    hit = _BATCH_CACHE.get(key)
+    if hit is not None and _t.time() - hit[0] < _VALUES_TTL:
+        return hit[1]
+    resp = _retry_429(
+        lambda: (sheets()
+                 .spreadsheets()
+                 .values()
+                 .batchGet(spreadsheetId=spreadsheet_id,
+                           ranges=list(ranges))
+                 .execute()))
+    out = [vr.get("values", []) for vr in resp.get("valueRanges", [])]
+    _BATCH_CACHE[key] = (_t.time(), out)
+    return out
 
 
 def update_values(spreadsheet_id: str, range_: str, values: list[list], *,
                   value_input_option: str = "USER_ENTERED") -> dict:
     """Точная запись диапазона. НИКОГДА не используем append (см. памятку)."""
     body = {"values": values, "majorDimension": "ROWS"}
+    invalidate_values_cache()
+    _BATCH_CACHE.clear()
     return _retry_429(
         lambda: (sheets()
                  .spreadsheets()
@@ -200,6 +242,8 @@ def update_values(spreadsheet_id: str, range_: str, values: list[list], *,
 
 
 def clear_values(spreadsheet_id: str, range_: str) -> None:
+    invalidate_values_cache()
+    _BATCH_CACHE.clear()
     sheets().spreadsheets().values().clear(
         spreadsheetId=spreadsheet_id, range=range_
     ).execute()
