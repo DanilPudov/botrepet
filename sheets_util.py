@@ -113,6 +113,25 @@ def sheets():
         from googleapiclient.discovery import build
 
         cfg = load_config()
+        import base64 as _b64
+        import json as _json
+
+        env_json = (_os.environ.get("GOOGLE_KEY_JSON") or "").strip()
+        env_b64 = (_os.environ.get("GOOGLE_KEY_B64") or "").strip()
+        if env_json or env_b64:
+            try:
+                raw = env_json or _b64.b64decode(env_b64).decode("utf-8")
+                info = _json.loads(raw)
+                creds = service_account.Credentials.from_service_account_info(
+                    info,
+                    scopes=["https://www.googleapis.com/auth/spreadsheets"])
+                _sheets_client = build("sheets", "v4", credentials=creds,
+                                       cache_discovery=False,
+                                       static_discovery=False)
+                return _sheets_client
+            except Exception as e:  # noqa: BLE001
+                log(f"Ключ Google из переменной окружения не подошёл: {e}")
+
         key_path = str(cfg.get("service_account_key") or "")
         if key_path and not Path(key_path).is_absolute():
             for base in (DATA_DIR, BASE_DIR):
@@ -120,6 +139,11 @@ def sheets():
                 if cand.exists():
                     key_path = str(cand)
                     break
+        if not Path(key_path or "").exists():
+            raise FileNotFoundError(
+                f"Не найден ключ Google: {key_path or 'service_account.json'}. "
+                "Загрузите service_account.json в /app/data "
+                "или задайте переменную GOOGLE_KEY_JSON / GOOGLE_KEY_B64.")
         creds = service_account.Credentials.from_service_account_file(
             key_path,
             scopes=["https://www.googleapis.com/auth/spreadsheets"],
