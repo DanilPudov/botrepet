@@ -467,45 +467,6 @@ def parse_color(text: str) -> dict | None:
     return None
 
 
-def set_name_color(lesson_id, color_text: str,
-                   title: str | None = None) -> bool:
-    """Покрасить имя ученика (колонка D) в заданный цвет."""
-    color = parse_color(color_text)
-    if color is None:
-        return False
-    found = None
-    if title:
-        sh, t = _sheet_spreadsheet(title)
-        row_num = _find_row_by_lesson_id(lesson_id, title)
-        if row_num:
-            found = (sh, t, row_num)
-    if not found:
-        found = _find_lesson_anywhere(lesson_id)
-    if not found:
-        return False
-    from sheets_util import sheets
-    sh_id, sheet_title, row = found
-    sheets().spreadsheets().batchUpdate(
-        spreadsheetId=sh_id,
-        body={"requests": [{
-            "repeatCell": {
-                "range": {
-                    "sheetId": _sheet_gid(sh_id, sheet_title),
-                    "startRowIndex": row - 1,
-                    "endRowIndex": row,
-                    "startColumnIndex": 3,   # D — имя ученика
-                    "endColumnIndex": 4,
-                },
-                "cell": {"userEnteredFormat": {
-                    "textFormat": {"foregroundColor": color}}},
-                "fields": "userEnteredFormat.textFormat.foregroundColor",
-            }
-        }]}).execute()
-    invalidate_cache()
-    log(f"ЦВЕТ имени {lesson_id} ({sheet_title}): {color_text}")
-    return True
-
-
 def get_tutor_color(tutor: str) -> dict | None:
     """Сохранённый цвет имени репетитора (из настроек)."""
     from sheets_util import load_state
@@ -779,6 +740,7 @@ def ensure_checks_ids() -> int:
     # шапка «Чеков» защищена — пишем только по одной строке, пропуская ошибки
     added = 0
     failed = 0
+    counter: dict[str, int] = {}
     for n, row in enumerate(rows):
         if n == 0:
             continue
@@ -788,10 +750,16 @@ def ensure_checks_ids() -> int:
         has_data = len(row) >= 4 and (str(row[2]).strip() or str(row[3]).strip())
         if not has_data:
             continue
-        mx += 1
+        # префикс — из даты самой строки, иначе старые записи получают
+        # сегодняшнюю дату в ID и путают поиск
+        row_prefix = prefix
+        d = _parse_day(row[1]) if len(row) > 1 else None
+        if isinstance(d, dt.date):
+            row_prefix = f"{d.day}{d.month:02d}"
+        counter[row_prefix] = counter.get(row_prefix, 0) + 1
         try:
             update_values(sh_id, f"'{title}'!L{n + 1}",
-                          [[prefix + str(mx)]])
+                          [[row_prefix + str(counter[row_prefix])]])
             added += 1
         except Exception:  # noqa: BLE001
             failed += 1
