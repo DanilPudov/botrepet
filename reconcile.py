@@ -213,53 +213,6 @@ def next_history_row() -> int:
     return last + 1
 
 
-def write_history(checks: list[dict], dry_run: bool = False) -> int:
-    cfg = load_config()
-    sh_id = cfg["sheets"]["history"]
-    title = cfg["sheets"]["history_sheet"]
-    start_row = next_history_row()
-    if not checks:
-        return start_row
-
-    values = [[c["время"], c["дата"].strftime("%d.%m.%Y"), c["репетитор"], c["ученик"],
-               c["сумма"], c["комментарий"], c["первое"], c["как_прошло"], c["будут"],
-               c["комиссия"]] for c in checks]
-    end_row = start_row + len(values) - 1
-    log(f"История: пишу {len(values)} строк в {start_row}..{end_row}")
-    if dry_run:
-        return start_row
-
-    update_values(sh_id, f"'{title}'!A{start_row}:J{end_row}", values)
-
-    # оформление: белый текст + выравнивание, суммы зелёным/красным
-    def fmt(r0, r1, color):
-        return {"repeatCell": {
-            "range": {"sheetId": 0, "startRowIndex": r0 - 1, "endRowIndex": r1,
-                      "startColumnIndex": 0, "endColumnIndex": 10},
-            "cell": {"userEnteredFormat": {
-                "horizontalAlignment": "CENTER", "verticalAlignment": "MIDDLE",
-                "textFormat": {"foregroundColor": WHITE}}},
-            "fields": "userEnteredFormat(horizontalAlignment,verticalAlignment,textFormat)"}}
-
-    def money(r0, r1, color):
-        return {"repeatCell": {
-            "range": {"sheetId": 0, "startRowIndex": r0 - 1, "endRowIndex": r1,
-                      "startColumnIndex": 4, "endColumnIndex": 5},
-            "cell": {"userEnteredFormat": {"textFormat": {"foregroundColor": color}}},
-            "fields": "userEnteredFormat.textFormat"}}
-
-    reqs = [fmt(start_row, end_row, WHITE)]
-    for i, c in enumerate(checks):
-        r = start_row + i
-        reqs.append(money(r, r, GREEN if c["paid"] else RED))
-    sheets().spreadsheets().batchUpdate(
-        spreadsheetId=sh_id, body={"requests": reqs}).execute()
-    return start_row
-
-
-# --------------------------------------------------------------------------- #
-# Остатки комиссий (правая таблица в 2027) — только отчёт
-# --------------------------------------------------------------------------- #
 def commission_balances() -> dict[str, int]:
     cfg = load_config()
     title = "Репетиторы и ученики 2027"
