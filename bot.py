@@ -234,7 +234,7 @@ def kb_more(user_id: int) -> InlineKeyboardMarkup:
         if view_as_name(user_id):
             rows.append([("🔄 Сменить репетитора", "view_mode")])
         rows.append([("⚙️ Управление", "admin")])
-    rows.append([("⬅️ Назад", "menu")])
+    rows.append([("⬅️ Назад", "nav:back")])
     return kb(rows)
 
 
@@ -491,7 +491,7 @@ async def show_student_card(update: Update, context: ContextTypes.DEFAULT_TYPE,
         [("📝 Комментарий", "sedit:comment")],
         [("✏️ Изменить расписание", "sedit:sched")],
         [("🗑 Удалить ученика", "sedit:del")],
-        [("⬅️ Назад", "students")],
+        [("⬅️ Назад", "nav:back")],
     ]))
 
 
@@ -791,7 +791,7 @@ async def schedule_view(user_id: int, days: int) -> tuple[str, list[list[tuple[s
         if not parts:
             parts.append("Занятий в этом периоде нет.")
         rows = [[("📅 Сегодня", "sched:today"), ("📅 Неделя", "sched:week")],
-                [("⬅️ Назад", "menu")]]
+                [("⬅️ Назад", "nav:back")]]
         body = "\n".join(parts)
         count = sum(1 for l in parts if l.startswith("  ") and "(отменено)" not in l)
         payout = int(total * 0.8)
@@ -840,7 +840,7 @@ async def schedule_view(user_id: int, days: int) -> tuple[str, list[list[tuple[s
                      ("❌ Отмена занятия", "cancel_lesson")])
         rows.append([("📅 Неделя", "sched:week"),
                      ("📅 Месяц вперёд", "sched:month")])
-        rows.append([("⬅️ Назад", "menu")])
+        rows.append([("⬅️ Назад", "nav:back")])
     else:  # неделя — блоки по дням + кнопка «изменить день»
         monday = dt.date.today() - dt.timedelta(days=today_wd)
         for d in range(7):
@@ -880,7 +880,7 @@ async def schedule_view(user_id: int, days: int) -> tuple[str, list[list[tuple[s
                      ("📅 Месяц вперёд", "sched:month")])
         rows.append([("➕ Разовое занятие", "addonce"),
                      ("❌ Отмена занятия", "cancel_lesson")])
-        rows.append([("⬅️ Назад", "menu")])
+        rows.append([("⬅️ Назад", "nav:back")])
 
     iso_week = dt.date.today().isocalendar()[1]
     parity = "чётная" if iso_week % 2 == 0 else "нечётная"
@@ -1021,10 +1021,88 @@ async def _cleanup_extras(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             pass
 
 
+NAV_SCREENS = (
+    "menu", "more", "students", "mine", "mine:edit", "pastweek", "notes",
+    "reviews", "referrals", "help", "rename", "suggest", "admin",
+    "sched:", "schday:", "addw:", "sch:list", "sch:open:", "student:",
+    "mact:", "cancel_lesson", "cxd:", "view_mode", "view:",
+)
+
+_NAV_PENDING: dict[int, str] = {}
+
+
+def _nav_is_screen(data: str) -> bool:
+    return any(data == s or data.startswith(s) for s in NAV_SCREENS)
+
+
+def _nav_state(user_id: int) -> dict:
+    nav = (load_state().get("nav") or {}).get(str(user_id))
+    if not isinstance(nav, dict):
+        nav = {"stack": [], "current": "menu"}
+    return nav
+
+
+def _nav_save(user_id: int, nav: dict) -> None:
+    st = load_state()
+    st.setdefault("nav", {})[str(user_id)] = nav
+    save_state(st)
+
+
+def _nav_push(user_id: int, data: str) -> None:
+    """Запомнить переход на новый экран (для кнопки «Назад»)."""
+    if not _nav_is_screen(data):
+        return
+    nav = _nav_state(user_id)
+    if data == "menu":
+        # «Домой» — сбрасываем историю
+        nav["stack"] = []
+        nav["current"] = "menu"
+        _nav_save(user_id, nav)
+        return
+    if nav.get("current") != data:
+        stack = nav.get("stack") or []
+        stack.append(nav.get("current") or "menu")
+        nav["stack"] = stack[-20:]
+        nav["current"] = data
+        _nav_save(user_id, nav)
+
+
+def _nav_pop(user_id: int) -> str:
+    """Вернуть предыдущий экран (по умолчанию — главное меню)."""
+    nav = _nav_state(user_id)
+    stack = nav.get("stack") or []
+    target = stack.pop() if stack else "menu"
+    nav["stack"] = stack
+    nav["current"] = target
+    _nav_save(user_id, nav)
+    return target
+
+
+async def _nav_go(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                  target: str) -> None:
+    """Открыть экран, не трогая объект callback (он неизменяемый)."""
+    user = update.effective_user
+    _NAV_PENDING[user.id] = target
+    try:
+        await handle_callback(update, context)
+    except Exception as e:  # noqa: BLE001
+        log(f"Навигация назад на «{target}» не удалась: {e}")
+        try:
+            await show_main(update, context, edit=True)
+        except Exception:  # noqa: BLE001
+            pass
+    finally:
+        _NAV_PENDING.pop(user.id, None)
+
+
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     user = q.from_user
-    data = q.data or ""
+    data = _NAV_PENDING.pop(user.id, None) or (q.data or "")
+    if data == "nav:back":
+        await _nav_go(update, context, _nav_pop(user.id))
+        return
+    _nav_push(user.id, data)
     if data not in ("noop",):
         try:
             await _cleanup_extras(update, context)
@@ -1069,7 +1147,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         status_txt = "✅ Принято" if accepted else "❌ Отклонено"
         await q.edit_message_text(
             f"{status_txt}\n\n{item.get('текст', '')[:400]}",
-            reply_markup=kb([[("⬅️ Назад", "menu")]]))
+            reply_markup=kb([[("⬅️ Назад", "nav:back")]]))
         # сообщить автору: первые 10 слов + «...» и кнопка «ок»
         author = norm_name(item.get("репетитор", ""))
         words = str(item.get("текст", "")).split()
@@ -1346,7 +1424,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.answer()
         if data == "help":
             await q.edit_message_text(HELP_TEXT, parse_mode=ParseMode.HTML,
-                                      reply_markup=kb([[("⬅️ Назад", "menu")]]))
+                                      reply_markup=kb([[("⬅️ Назад", "nav:back")]]))
         else:
             await show_main(update, context, edit=True)
         return
@@ -1404,7 +1482,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                        if str(x.get("id") or "") == lid), None)
         if not target:
             await q.edit_message_text("Запись не найдена.",
-                                      reply_markup=kb([[("⬅️ Назад", "mine")]]))
+                                      reply_markup=kb([[("⬅️ Назад", "mine:edit")]]))
             return
         p = {"шаг": "перенос_дата", "edit_id": lid,
              "репетитор": target["репетитор"], "ученик": target["ученик"],
@@ -1449,7 +1527,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.answer()
         if role != OWNER:
             await q.edit_message_text("Раздел только для организатора.",
-                                      reply_markup=kb([[("⬅️ Назад", "menu")]]))
+                                      reply_markup=kb([[("⬅️ Назад", "nav:back")]]))
             return
         st = load_state()
         n = len(st.get("tutors", []))
@@ -1466,7 +1544,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• /report `<id>` — сводка (или без id — по всем)\n"
         )
         await q.edit_message_text(text, parse_mode=ParseMode.MARKDOWN,
-                                  reply_markup=kb([[("⬅️ Назад", "menu")]]))
+                                  reply_markup=kb([[("⬅️ Назад", "nav:back")]]))
         return
 
     # --- разделы меню: доступны и без начатого черновика ---
@@ -1482,7 +1560,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tutor = name_by_id(user.id) or ""
         roster = students_module.students_of(tutor) if tutor else []
         if idx >= len(roster):
-            await q.edit_message_text("Список устарел.", reply_markup=kb([[("Назад", "students")]]))
+            await q.edit_message_text("Список устарел.",
+                                      reply_markup=kb([[("⬅️ Назад", "students")]]))
             return
         s = roster[idx]
         p = {"шаг": "карточка_ученика", "ученик": s["ученик"],
@@ -1499,7 +1578,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [("📝 Комментарий", "sedit:comment")],
             [("✏️ Изменить расписание", "sedit:sched")],
             [("🗑 Удалить ученика", "sedit:del")],
-            [("⬅️ Назад", "students")],
+            [("⬅️ Назад", "nav:back")],
         ]))
         return
 
@@ -1507,7 +1586,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.answer()
         p = get_pending(user.id)
         if not p or not p.get("ученик"):
-            await q.edit_message_text("Откройте ученика заново.", reply_markup=kb([[("Назад", "students")]]))
+            await q.edit_message_text("Откройте ученика заново.",
+                                      reply_markup=kb([[("⬅️ Назад", "students")]]))
             return
         what = data.split(":", 1)[1]
         if what == "del":
@@ -1584,7 +1664,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "За каждый отзыв начисляется *400 ₽*.")
         await q.edit_message_text(text, parse_mode=ParseMode.MARKDOWN,
                                   reply_markup=kb([[("➕ Добавить отзыв", "review:add")],
-                                                   [("⬅️ Назад", "menu")]]))
+                                                   [("⬅️ Назад", "nav:back")]]))
         return
 
     if data == "review:add":
@@ -1594,7 +1674,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         p = {"шаг": "отзыв_ученик", "репетитор": tutor}
         set_pending(user.id, p)
         rows = [[(s["ученик"], f"review:stu:{i}")] for i, s in enumerate(roster)]
-        rows.append([("Без ученика", "review:stu:none"), ("⬅️ Назад", "reviews")])
+        rows.append([("Без ученика", "review:stu:none"),
+                     ("⬅️ Назад", "reviews")])
         await q.edit_message_text(
             "За кого отзыв?", reply_markup=kb(rows))
         return
@@ -1633,7 +1714,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "Приведите репетитора — получите *500 ₽*.\n\nПока никого нет.")
         await q.edit_message_text(text, parse_mode=ParseMode.MARKDOWN,
                                   reply_markup=kb([[("➕ Указать репетитора", "ref:add")],
-                                                   [("⬅️ Назад", "menu")]]))
+                                                   [("⬅️ Назад", "nav:back")]]))
         return
 
     if data == "ref:add":
@@ -1746,9 +1827,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not seen_days:
             await q.edit_message_text(
                 "⚠️ На ближайшие 15 дней занятий нет — отменять нечего.",
-                reply_markup=kb([[("⬅️ Назад", "sched:week")]]))
+                reply_markup=kb([[("⬅️ Назад", "nav:back")]]))
             return
-        rows.append([("⬅️ Назад", "sched:week")])
+        rows.append([("⬅️ Назад", "nav:back")])
         await q.edit_message_text(
             "❌ *Отмена занятия*\n\nВыберите день:",
             parse_mode=ParseMode.MARKDOWN, reply_markup=kb(rows))
@@ -2047,7 +2128,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [("🧒 Карточка ученика", f"sch:card:{rid}")],
                 [("✏️ Изменить день и время", f"sch:edit:{rid}")],
                 [("🗑 Удалить занятие", f"sch:del:{rid}")],
-                [("⬅️ Назад", "sch:list")],
+                [("⬅️ Назад", "nav:back")],
             ]))
         return
 
@@ -2423,7 +2504,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                   parse_mode=ParseMode.MARKDOWN,
                                   reply_markup=kb([[("За неделю", "sched:week"),
                                                     ("За месяц", "sched:month")],
-                                                   [("⬅️ Назад", "menu")]]))
+                                                   [("⬅️ Назад", "nav:back")]]))
         return
 
     await q.answer()
@@ -3512,7 +3593,7 @@ async def show_students_list(update: Update, context: ContextTypes.DEFAULT_TYPE)
     text = ("👥 *Мои ученики*\n\nНажмите на ученика, чтобы изменить имя, "
             "родителя или цену." if roster else
             "👥 *Мои ученики*\n\nПока пусто. Добавьте первого.")
-    rows.append([("➕ Добавить ученика", "add_student2"), ("⬅️ Назад", "menu")])
+    rows.append([("➕ Добавить ученика", "add_student2"), ("⬅️ Назад", "nav:back")])
     await _say(update, text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb(rows))
 
 
@@ -3578,7 +3659,7 @@ async def show_mine_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     rows = []
     if lessons:
         rows.append([("✏️ Изменить", "mine:edit")])
-    rows.append([("⬅️ Назад", "menu")])
+    rows.append([("⬅️ Назад", "nav:back")])
     await _say(update, text, parse_mode=ParseMode.HTML, reply_markup=kb(rows))
 
 
@@ -3638,7 +3719,7 @@ async def show_past_week(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 + f"\n\n✅ подтверждено: <b>{paid_sum} ₽</b>"
                 + f"\n❌ не подтверждено: <b>{no_sum} ₽</b>"
                 + f"\n\n<b>Итого — {_payout} ₽</b> (к выплате, 80%)")
-    rows.append([("⬅️ Назад", "more")])
+    rows.append([("⬅️ Назад", "nav:back")])
     await _say(update, text, parse_mode=ParseMode.HTML, reply_markup=kb(rows))
 
 
@@ -4041,16 +4122,45 @@ def print_token_rejected():
     print("=" * 60)
 
 
+_LOCK_HANDLE = None
+
+
 def _single_instance() -> None:
-    """Не дать запустить второй экземпляр бота (иначе двойные ответы)."""
+    """Не дать запустить второй экземпляр бота.
+
+    На Linux/Docker используем flock: блокировка снимается автоматически,
+    когда процесс завершается. Это важно в контейнере, где бот = PID 1
+    и проверка os.kill(1, 0) всегда «видит живой процесс».
+    """
+    global _LOCK_HANDLE
     import os
     from pathlib import Path as _P
     lock = str(_P(str(sheets_util.CONFIG_PATH)).parent / "bot.lock")
     try:
+        fh = open(lock, "a+", encoding="utf-8")
+        try:
+            import fcntl
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            _LOCK_HANDLE = fh          # держим открытым, пока жив процесс
+            fh.seek(0)
+            fh.truncate()
+            fh.write(str(os.getpid()))
+            fh.flush()
+            return
+        except ImportError:
+            fh.close()                 # Windows — ниже старая проверка
+        except OSError:
+            fh.close()
+            print("Бот уже запущен. Второй экземпляр не нужен.")
+            sys.exit(0)
+    except Exception:  # noqa: BLE001
+        pass
+    # --- запасной путь (Windows) ---
+    try:
         if os.path.exists(lock):
             with open(lock, "r", encoding="utf-8") as f:
                 pid = int((f.read() or "0").strip() or 0)
-            if pid:
+            if pid and pid != os.getpid():
                 try:
                     os.kill(pid, 0)
                     print("Бот уже запущен (pid %d). Второй экземпляр не нужен." % pid)
@@ -4059,7 +4169,7 @@ def _single_instance() -> None:
                     pass
         with open(lock, "w", encoding="utf-8") as f:
             f.write(str(os.getpid()))
-    except Exception:
+    except Exception:  # noqa: BLE001
         pass
 
 
