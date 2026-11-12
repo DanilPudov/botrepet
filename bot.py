@@ -59,6 +59,7 @@ import reviews as reviews_module
 import referrals as referrals_module
 import suggestions as suggestions_module
 import notes as notes_module
+import faq as faq_module
 import links as links_module
 import schedule as schedule_module
 from sheets_util import (
@@ -177,7 +178,18 @@ def name_by_id(user_id: int) -> str | None:
 # --------------------------------------------------------------------------- #
 # Клавиатуры
 # --------------------------------------------------------------------------- #
-def kb(rows: list[list[tuple[str, str]]]) -> InlineKeyboardMarkup:
+def kb(rows: list[list[tuple[str, str]]], home: bool = True) -> InlineKeyboardMarkup:
+    """Клавиатура из пар (текст, callback).
+
+    home=True (по умолчанию) добавляет внизу «🏠 Домой», если её ещё нет —
+    чтобы из любого раздела можно было выйти на главный экран.
+    """
+    rows = [list(r) for r in rows]
+    if home:
+        texts = [t for r in rows for t, _ in r]
+        datas = [d for r in rows for _, d in r]
+        if not any(t.startswith("🏠") for t in texts) and "menu" not in datas:
+            rows.append([("🏠 Домой", "menu")])
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(text, callback_data=data) for text, data in row]
         for row in rows
@@ -214,7 +226,7 @@ MAIN_TEXT = "Выберите действие:"
 
 
 def kb_main(user_id: int) -> InlineKeyboardMarkup:
-    return kb([
+    return kb(home=False, rows=[
         [("📝 Записать занятие", "new")],
         [("📊 Текущие 2 недели", "mine"), ("📅 Расписание", "sched:today")],
         [("📝 Заметки", "notes")],
@@ -228,7 +240,7 @@ def kb_more(user_id: int) -> InlineKeyboardMarkup:
         [("⭐ Отзывы", "reviews"), ("🎁 Рефералы", "referrals")],
         [("📆 Предыдущие 2 недели", "pastweek")],
         [("💡 Предложить улучшение", "suggest")],
-        [("✏️ Изменить имя", "rename"), ("❓ Помощь", "help")],
+        [("✏️ Изменить имя", "rename"), ("❓ FAQ", "faq")],
     ]
     if role_of(user_id) == OWNER:
         if view_as_name(user_id):
@@ -269,7 +281,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Если у вас нет доступа, можно записать занятие вручную — с пометкой, "
             "что запись сделана с другого аккаунта.",
             parse_mode=ParseMode.MARKDOWN,
-            reply_markup=kb([[("✍️ Ввести имя вручную", "manual:start")]]),
+            reply_markup=kb([[("✍️ Ввести имя вручную", "manual:start")]],
+                            home=False),
         )
         return
 
@@ -1420,13 +1433,14 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                   reply_markup=kb_more(user.id))
         return
 
-    if data in ("menu", "help"):
+    if data in ("menu", "faq", "help"):
         await q.answer()
-        if data == "help":
-            await q.edit_message_text(HELP_TEXT, parse_mode=ParseMode.HTML,
+        if data in ("faq", "help"):
+            await q.answer()
+            await q.edit_message_text(_faq_text(), parse_mode=ParseMode.HTML,
                                       reply_markup=kb([[("⬅️ Назад", "nav:back")]]))
-        else:
-            await show_main(update, context, edit=True)
+            return
+        await show_main(update, context, edit=True)
         return
 
     if data == "mine":
@@ -2851,25 +2865,33 @@ async def schedule_text(user_id: int, days: int) -> str:
             + f"\n\n*Итого: {total} ₽*" + tail)
 
 
-HELP_TEXT = (
-    "❓ <b>Помощь</b>\n\n"
-    "📝 <b>Записать занятие</b> — ученик → дата → сумма → время → сохранить. "
-    "Можно ввести своё время сообщением. Запись идёт в ваш лист «История».\n\n"
-    "📊 <b>Текущие 2 недели</b> — занятия за 2 недели, ✅ оплата подтверждена, "
-    "⚪️ не проверено. Здесь же «✏️ Изменить»: сумма, перенос, удаление. "
-    "К выплате — минус 20% (без учёта комиссии за ученика).\n\n"
-    "📆 <b>Предыдущие 2 недели</b> — ✅ оплачено, ❌ отклонено, ⚪️ не проверено.\n\n"
-    "📅 <b>Расписание</b> — сегодня / неделя / месяц. "
-    "➕ разовое занятие, ❌ отмена (и ↩️ вернуть), ✏️ редактирование дня. "
-    "Отменённые помечены ❌ и не попадают в напоминания.\n\n"
-    "👥 <b>Мои ученики</b> — имя, родитель, цена, комментарий, "
-    "🔗 ссылки на чаты (Telegram, ВК, WhatsApp, Viber, Max, телефон, любая своя), "
-    "«Имя отправителя» для распознавания платежей и расписание ученика.\n\n"
-    "📝 <b>Заметки</b> — любая важная информация, хранится в таблице.\n\n"
-    "⭐ Отзывы (+400 ₽) · 🎁 Рефералы (500 ₽) · 💡 Предложить улучшение.\n\n"
-    "🧹 «Удалить все сообщения» — чистит переписку за 48 часов. "
-    "🏠 «Домой» — на главный экран с любого места."
-)
+def _faq_text() -> str:
+    """Текст раздела FAQ из листа «FAQ» (вопросы + ответы)."""
+    try:
+        items = faq_module.rows()
+    except Exception as e:  # noqa: BLE001
+        log(f"FAQ: ошибка чтения: {e}")
+        items = []
+    if not items:
+        return ("❓ <b>FAQ — частые вопросы</b>\n\n"
+                "Ваших вопросов пока не было.")
+    parts = ["❓ <b>FAQ — частые вопросы</b>\n"]
+    for n, it in enumerate(items, 1):
+        q = it["вопрос"].replace("<", "&lt;").replace(">", "&gt;")
+        parts.append(f"<b>{n}. {q}</b>")
+        if it["ответ"]:
+            a = it["ответ"].replace("<", "&lt;").replace(">", "&gt;")
+            parts.append(f"   {a}")
+        else:
+            parts.append("   <i>ответ готовится</i>")
+        parts.append("")
+    return "\n".join(parts).strip()
+
+
+FAQ_TEXT = "❓ <b>FAQ — частые вопросы</b>\n\nВаших вопросов пока не было."
+HELP_TEXT = FAQ_TEXT
+
+HELP_TEXT = FAQ_TEXT
 
 
 async def _delete_later(context, chat_id: int, message_id: int,
@@ -4012,9 +4034,18 @@ def _chat_id_by_tutor(tutor: str) -> int | None:
 
 
 async def notify_update(context_or_app) -> None:
-    """Отправить владельцу заметку об обновлении из update_note.txt."""
-    note_path = sheets_util.DATA_DIR / "update_note.txt"
-    if not note_path.exists():
+    """Разослать всем краткое уведомление об обновлении.
+
+    Заметка берётся из DATA_DIR/update_note.txt или из папки бота
+    (файл в репозитории — удобно обновлять через GitHub).
+    Повторно после перезапуска не отправляется: запоминается отпечаток.
+    """
+    import hashlib
+
+    candidates = [sheets_util.DATA_DIR / "update_note.txt",
+                  sheets_util.BASE_DIR / "update_note.txt"]
+    note_path = next((p for p in candidates if p.exists()), None)
+    if note_path is None:
         return
     try:
         note = note_path.read_text(encoding="utf-8").strip()
@@ -4027,19 +4058,42 @@ async def notify_update(context_or_app) -> None:
         except OSError:
             pass
         return
+
+    # отпечаток: не отправлять одно и то же дважды
+    digest = hashlib.sha1(note.encode("utf-8")).hexdigest()[:16]
+    marker = sheets_util.DATA_DIR / "update_note.sent"
+    try:
+        if marker.exists() and marker.read_text(encoding="utf-8").strip() == digest:
+            log("Уведомление об обновлении уже отправлено ранее")
+            try:
+                note_path.unlink()
+            except OSError:
+                pass
+            return
+    except OSError:
+        pass
+
     cfg = load_config()
     bot_obj = getattr(context_or_app, "bot", context_or_app)
     # краткая версия: первая строка-заголовок + до 5 пунктов по 1 строке
     lines = [ln.strip() for ln in note.split("\n") if ln.strip()]
     head = lines[0] if lines else "🤖 Бот обновлён"
-    bullets = [ln for ln in lines[1:] if ln[:1].isdigit() or ln.startswith(("•", "-"))]
-    brief = head + "\n\n" + "\n".join(
-        b if len(b) <= 90 else b[:87] + "..." for b in bullets[:5])
+    bullets = [ln for ln in lines[1:]
+               if ln[:1].isdigit() or ln.startswith(("•", "-"))]
+    brief = head
+    if bullets:
+        brief += "\n\n" + "\n".join(
+            b if len(b) <= 90 else b[:87] + "..." for b in bullets[:5])
     markup = kb([[("Отлично", "dismiss")]])
 
-    targets = []
+    targets: list[int] = []
     for oid in cfg.get("owner_ids", []):
-        targets.append(int(oid))
+        try:
+            t = int(oid)
+        except (ValueError, TypeError):
+            continue
+        if t not in targets:
+            targets.append(t)
     for t in load_state().get("tutors", []):
         try:
             tid = int(t["id"])
@@ -4055,10 +4109,16 @@ async def notify_update(context_or_app) -> None:
             log(f"Уведомление об обновлении отправлено {tid}")
         except Exception as e:  # noqa: BLE001
             log(f"Не смог отправить уведомление {tid}: {e}")
+
+    try:
+        marker.write_text(digest, encoding="utf-8")
+    except OSError:
+        pass
     try:
         note_path.unlink()
     except OSError:
         pass
+
 
 
 async def post_init(app: Application):
@@ -4066,7 +4126,8 @@ async def post_init(app: Application):
         BotCommand("start", "Главное меню"),
         BotCommand("new", "Записать занятие"),
         BotCommand("mine", "Текущие 2 недели"),
-        BotCommand("help", "Помощь"),
+        BotCommand("faq", "FAQ"),
+        BotCommand("help", "FAQ"),
     ])
     try:
         await notify_update(app)
