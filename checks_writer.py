@@ -297,11 +297,66 @@ def append_check(record: dict) -> int:
 # --------------------------------------------------------------------------- #
 # Чтение занятий из таблицы (включая строки, добавленные руками)
 # --------------------------------------------------------------------------- #
+_MONTHS_RU = {
+    "янв": 1, "фев": 2, "мар": 3, "апр": 4, "ма": 5, "мая": 5, "май": 5,
+    "июн": 6, "июл": 7, "авг": 8, "сен": 9, "окт": 10, "ноя": 11, "дек": 12,
+}
+
+
 def _parse_day(value) -> dt.date | None:
-    try:
-        return dt.datetime.strptime(str(value).strip(), "%d.%m.%Y").date()
-    except (ValueError, TypeError):
+    """Дата из ячейки в разных форматах, встречающихся в таблице.
+
+    Понимает: 15.11.2026, 15.11.26, 2026-11-15, 15/11/2026, 15,11,2026,
+    16:09.2026 (опечатка), 19 апр было занятие, объекты date/datetime.
+    """
+    if isinstance(value, dt.datetime):
+        return value.date()
+    if isinstance(value, dt.date):
+        return value
+    s = str(value or "").strip()
+    if not s:
         return None
+
+    # «15.11.26» и прочие разделители на точку/слэш/запятую/двоеточие
+    norm = (s.replace("/", ".").replace(",", ".")
+             .replace(":", ".").replace(";", "."))
+    parts = [p for p in norm.split(".") if p]
+    if len(parts) == 3 and all(p.strip().isdigit() for p in parts):
+        a, b, cc = (int(p) for p in parts)
+        # год в конце: 26 -> 2026, 2026 -> 2026
+        if cc < 100:
+            cc += 2000
+        for day, month in ((a, b), (b, a)):
+            if 1 <= day <= 31 and 1 <= month <= 12 and 2000 <= cc <= 2100:
+                try:
+                    return dt.date(cc, month, day)
+                except ValueError:
+                    continue
+
+    # ISO: 2026-11-15
+    try:
+        return dt.datetime.strptime(s[:10], "%Y-%m-%d").date()
+    except (ValueError, TypeError):
+        pass
+
+    # «19 апр было занятие», «25апр было занятие»
+    import re as _re
+    m = _re.search(r"(\d{1,2})\s*([а-яё]{3,})", s.lower())
+    if m:
+        day = int(m.group(1))
+        mon = m.group(2)[:3]
+        month = _MONTHS_RU.get(mon)
+        if month:
+            year = dt.date.today().year
+            ym = _re.search(r"(20\d{2})", s)
+            if ym:
+                year = int(ym.group(1))
+            try:
+                return dt.date(year, month, day)
+            except ValueError:
+                pass
+
+    return None
 
 
 def _parse_sum(value) -> int:
@@ -312,16 +367,20 @@ def _parse_sum(value) -> int:
         return 0
 
 
-def _rows_from(sh_id: str, title: str) -> list[dict]:
+def _rows_from(sh_id: str, title: str,
+               values: list | None = None) -> list[dict]:
     """Читает занятия по схеме:
     A время | B дата | C репетитор | D имя ученика | E имя родителя |
     F сумма | G комментарий | H первое | I как прошло | J будут |
     K комиссия | L ID занятия
     """
-    try:
-        rows = get_values(sh_id, f"'{title}'!A1:L")
-    except Exception:  # noqa: BLE001
-        return []
+    if values is not None:
+        rows = values
+    else:
+        try:
+            rows = get_values(sh_id, f"'{title}'!A1:L")
+        except Exception:  # noqa: BLE001
+            return []
     out = []
     for row in rows[1:]:
         if len(row) < 6:
@@ -592,48 +651,65 @@ def set_lesson_paid(lesson_id, paid: bool, title: str | None = None) -> bool:
 def lesson_flags() -> dict[str, str]:
     """{id занятия: 'paid'|'no'|''} по цвету суммы (колонка F).
 
-    Читает ВСЕ листы занятий: «Занятия», «История Данил», «История Вика»,
-    «История». ID берётся из колонки L.
+    На каждый лист — один запрос и только нужные колонки (F и L),
+    а не весь диапазон A1:L. Результат кэшируется на 25 секунд.
     """
     cached = _cache_get(("flags",))
     if cached is not None:
         return cached
     from sheets_util import sheets
     cfg = load_config()
-    sh_id = cfg["sheets"]["history"]
-    try:
-        meta = sheets().spreadsheets().get(spreadsheetId=sh_id).execute()
-        titles = [s["properties"]["title"] for s in meta.get("sheets", [])]
-    except Exception:  # noqa: BLE001
-        return {}
-    sheets_to_read = [t for t in titles
-                      if t == "Занятия" or t.startswith("История")]
+    hist_id = cfg["sheets"]["history"]
+    recept_id = cfg["sheets"]["recept"]
+    checks_title = cfg["sheets"]["recept_checks_sheet"]
+
     out: dict[str, str] = {}
-    for title in sheets_to_read:
+    fields = ("sheets(data(rowData(values("
+              "formattedValue,effectiveFormat/textFormat/foregroundColor))))")
+
+    def _scan(sh_id: str, title: str) -> None:
         try:
-            values = get_values(sh_id, f"'{title}'!A1:L")
             grid = sheets().spreadsheets().get(
-                spreadsheetId=sh_id, ranges=[f"'{title}'!A1:L"],
-                includeGridData=True,
-                fields=("sheets(data(rowData(values("
-                        "effectiveFormat/textFormat/foregroundColor))))")
+                spreadsheetId=sh_id,
+                ranges=[f"'{title}'!F1:F", f"'{title}'!L1:L"],
+                includeGridData=True, fields=fields,
             ).execute()
         except Exception as e:  # noqa: BLE001
             log(f"Не прочитал цвета «{title}»: {e}")
-            continue
-        row_data = (grid.get("sheets", [{}])[0].get("data", [{}])[0]
-                    .get("rowData", []))
-        for idx, row in enumerate(values):
-            if len(row) < 12:
+            return
+        per_range = grid.get("sheets") or []
+        if not per_range:
+            return
+
+        def _rows_of(sheet_obj, pos=0):
+            data = (sheet_obj.get("data") or [])
+            if len(data) <= pos:
+                return []
+            return data[pos].get("rowData", [])
+
+        first = per_range[0]
+        data_parts = first.get("data") or []
+        if len(data_parts) >= 2:
+            # Google вернул оба диапазона внутри одной записи листа
+            sum_rows = _rows_of(first, 0)   # F (сумма)
+            id_rows = _rows_of(first, 1)    # L (ID)
+        elif len(per_range) >= 2:
+            sum_rows = _rows_of(per_range[0], 0)
+            id_rows = _rows_of(per_range[1], 0)
+        else:
+            return
+        for idx, id_row in enumerate(id_rows):
+            cells = id_row.get("values", [])
+            if not cells:
                 continue
-            lid = str(row[11]).strip()
+            lid = str(cells[0].get("formattedValue") or "").strip()
             if not lid:
                 continue
             fg = None
-            if idx < len(row_data):
-                cells = row_data[idx].get("values", [])
-                if len(cells) > 5:  # сумма — колонка F (индекс 5)
-                    fg = ((cells[5].get("effectiveFormat") or {})
+            if idx < len(sum_rows):
+                sc = sum_rows[idx].get("values", [])
+                if sc:
+                    fg = ((sc[0].get("effectiveFormat") or {})
                           .get("textFormat", {}).get("foregroundColor"))
             if not fg:
                 out.setdefault(lid, "")
@@ -646,6 +722,16 @@ def lesson_flags() -> dict[str, str]:
                 out[lid] = "no"
             else:
                 out.setdefault(lid, "")
+
+    try:
+        meta = sheets().spreadsheets().get(spreadsheetId=hist_id).execute()
+        titles = [s["properties"]["title"] for s in meta.get("sheets", [])]
+    except Exception:  # noqa: BLE001
+        titles = []
+    for title in [t for t in titles if t == "Занятия" or t.startswith("История")]:
+        _scan(hist_id, title)
+    _scan(recept_id, checks_title)
+
     return _cache_put(("flags",), out)
 
 
@@ -886,8 +972,16 @@ def read_lessons(include_history: bool = False,
     if not lesson_sheets:
         lesson_sheets = [_write_cfg().get("history_sheet") or TARGET_HISTORY_SHEET]
     lessons: list[dict] = []
-    for t in lesson_sheets:
-        for x in _rows_from(hist_id, t):
+    # все листы «Истории» — ОДНИМ batchGet вместо N чтений
+    try:
+        from sheets_util import get_values_batch
+        batch = get_values_batch(
+            hist_id, [f"'{t}'!A1:L" for t in lesson_sheets])
+    except Exception as e:  # noqa: BLE001
+        log(f"Пакетное чтение не удалось: {e}")
+        batch = [None] * len(lesson_sheets)
+    for t, vals in zip(lesson_sheets, batch):
+        for x in _rows_from(hist_id, t, values=vals):
             x["лист"] = t
             lessons.append(x)
 
