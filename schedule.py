@@ -21,6 +21,9 @@ COLUMNS = ["ID", "Репетитор", "Ученик", "Родитель", "Дн
 
 DAY_NAMES = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
 
+FULL_DAY_NAMES = ["понедельник", "вторник", "среда", "четверг",
+                  "пятница", "суббота", "воскресенье"]
+
 
 def ensure_sheet() -> str:
     from sheets_util import sheets
@@ -106,10 +109,14 @@ def add_cancel(tutor: str, student: str, day: dt.date, time_str: str) -> int:
     sh_id = cfg["sheets"]["history"]
     rows = _cancel_rows()
     last = 1
+    max_id = 0
     for n, row in enumerate(rows, start=1):
+        row = row or []
         if any(str(x).strip() for x in row):
             last = n
-    rid = last - 0
+        if row and str(row[0]).strip().isdigit():
+            max_id = max(max_id, int(str(row[0]).strip()))
+    rid = max_id + 1
     sheets_util.update_values(
         sh_id, f"'{CANCEL_SHEET}'!A{last + 1}:E{last + 1}",
         [[str(rid), tutor, student, day.strftime("%d.%m.%Y"), time_str]])
@@ -118,18 +125,31 @@ def add_cancel(tutor: str, student: str, day: dt.date, time_str: str) -> int:
 
 
 def is_cancelled(tutor: str, day: dt.date, time_str: str) -> bool:
+    want = parse_time_slot(time_str)
+    if want is None:
+        return False
     for c in cancels_for(tutor):
-        if c["дата"] == day and parse_time_slot(c["время"]) == parse_time_slot(time_str):
+        got = parse_time_slot(c["время"])
+        if got is not None and c["дата"] == day and got == want:
             return True
     return False
 
 
-def parse_time_slot(value) -> int:
+def parse_time_slot(value) -> int | None:
+    """Время → минуты от полуночи. None, если время не читается.
+
+    Раньше возвращалось -1, и два «нечитаемых» времени считались
+    совпадающими → занятие ложно помечалось отменённым.
+    """
     try:
         parts = str(value).replace(".", ":").split(":")
-        return int(parts[0]) * 60 + (int(parts[1]) if len(parts) > 1 else 0)
+        hh = int(parts[0])
+        mm = int(parts[1]) if len(parts) > 1 else 0
+        if not (0 <= hh <= 23 and 0 <= mm <= 59):
+            return None
+        return hh * 60 + mm
     except (ValueError, TypeError):
-        return -1
+        return None
 
 
 def remove_cancel(tutor: str, day: dt.date, time_str: str) -> bool:
@@ -309,7 +329,8 @@ def all_entries() -> list[dict]:
 
 def parse_days(text: str) -> list[int]:
     """'Пн,Ср' / 'пн ср' / '1,3' -> [0, 2]."""
-    text = text.replace(";", ",").replace("/", ",").lower()
+    text = (text.replace(";", ",").replace("/", ",")
+             .replace(" ", ",").replace("\t", ",").lower())
     out = []
     for part in text.split(","):
         part = part.strip()
@@ -323,6 +344,12 @@ def parse_days(text: str) -> list[int]:
         short = part[:2].capitalize()
         if short in DAY_NAMES:
             out.append(DAY_NAMES.index(short))
+            continue
+        # «понедельник», «воскресенье» и т.п.
+        for w, full in enumerate(FULL_DAY_NAMES):
+            if part and (full.startswith(part[:3]) or part.startswith(full[:3])):
+                out.append(w)
+                break
     return sorted(set(out))
 
 
