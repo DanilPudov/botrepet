@@ -309,8 +309,11 @@ async def show_owner_picker(update: Update, context: ContextTypes.DEFAULT_TYPE,
                             edit: bool = True) -> None:
     """Организатор выбирает, за какого репетитора зайти."""
     user = update.effective_user
-    names = [t.get("name", "") for t in load_state().get("tutors", [])
-             if t.get("name")]
+    names: list[str] = []
+    for t in load_state().get("tutors", []):
+        nm = (t.get("name") or "").strip()
+        if nm and nm not in names:      # у Ильхама два ID — показываем один раз
+            names.append(nm)
     rows = [[(n, f"view:{i}")] for i, n in enumerate(names)]
     rows.append([("👤 Мой профиль", "view:me")])
     text = ("👋 Вы организатор.\n\n"
@@ -2610,9 +2613,20 @@ async def _say(update: Update, text: str, reply_markup=None,
                parse_mode: str | None = None) -> None:
     """Отправить шаг диалога: отредактировать сообщение с кнопкой или ответить текстом."""
     if update.callback_query is not None:
-        await update.callback_query.edit_message_text(
-            text, parse_mode=parse_mode, reply_markup=with_home(reply_markup),
-            link_preview_options=LinkPreviewOptions(is_disabled=True))
+        try:
+            await update.callback_query.edit_message_text(
+                text, parse_mode=parse_mode, reply_markup=with_home(reply_markup),
+                link_preview_options=LinkPreviewOptions(is_disabled=True))
+        except Exception as e:  # noqa: BLE001
+            msg = str(e)
+            if "Message is not modified" in msg:
+                return
+            if "Message to edit not found" in msg or "no text in the message" in msg:
+                # сообщение удалено или уже сменилось — шлём новое
+                await _send(update, text, parse_mode=parse_mode,
+                            reply_markup=with_home(reply_markup))
+                return
+            raise
     else:
         await _send(update, text, parse_mode=parse_mode,
                     reply_markup=with_home(reply_markup))
@@ -4186,6 +4200,36 @@ def print_token_rejected():
 _LOCK_HANDLE = None
 
 
+_IGNORED_ERRORS = (
+    "Message is not modified",
+    "Message to edit not found",
+    "no text in the message",
+    "Query is too old",
+    "query id is invalid",
+    "Conflict: terminated by other getUpdates",
+    "Message can't be deleted",
+    "message is too long",
+)
+
+
+async def _on_error(update, context) -> None:
+    """Не засорять лог простынями: краткая запись о настоящих ошибках."""
+    err = getattr(context, "error", None)
+    text = str(err or "")
+    for known in _IGNORED_ERRORS:
+        if known in text:
+            # Telegram-служебные ситуации — молча
+            return
+    if err is None:
+        return
+    try:
+        user_id = getattr(update, "effective_user", None)
+        who = user_id.id if user_id else "?"
+    except Exception:  # noqa: BLE001
+        who = "?"
+    log(f"ОШИБКА у {who}: {type(err).__name__}: {text[:300]}")
+
+
 def _single_instance() -> None:
     """Не дать запустить второй экземпляр бота.
 
@@ -4277,6 +4321,7 @@ def main():
     app.add_handler(CommandHandler("access", set_access))
     app.add_handler(CommandHandler("report", report))
 
+    app.add_error_handler(_on_error)
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(
