@@ -383,7 +383,7 @@ def _rows_from(sh_id: str, title: str,
             return []
     out = []
     for row in rows[1:]:
-        if len(row) < 6:
+        if len(row) < 4:        # нужны хотя бы A..D; сумма может быть пустой
             continue
         tutor = norm_name(row[2]) if len(row) > 2 else ""
         d = _parse_day(row[1]) if len(row) > 1 else None
@@ -391,11 +391,13 @@ def _rows_from(sh_id: str, title: str,
             continue
         student = _cell(row, 3)
         parent = _cell(row, 4)
-        if not parent and "(" in student and student.rstrip().endswith(")"):
+        if not parent and "(" in student:
             # старый лист «История»: D = «Ученик (Родитель)»
-            _i = student.index("(")
-            parent = student[_i + 1:student.rindex(")")].strip()
-            student = student[:_i].strip()
+            _l = student.find("(")
+            _r = student.rfind(")")
+            if _l != -1 and _r > _l:
+                parent = student[_l + 1:_r].strip()
+                student = student[:_l].strip()
         out.append({
             "дата": d,
             "время": _cell(row, 0),
@@ -570,18 +572,30 @@ def apply_tutor_color(tutor: str, color: dict | None = None) -> int:
         rows = get_values(sh_id, f"'{sheet_title}'!A1:L")
     except Exception:  # noqa: BLE001
         return 0
-    count = 0
+    from sheets_util import sheets
     want = norm_name(str(tutor or ""))
-    for n, r in enumerate(rows, 1):
-        if n < FIRST_DATA_ROW:
-            continue
-        if norm_name(_cell(r, 2)) == want:
-            try:
-                _color_cell(sh_id, sheet_title, n, 2, color)
-                count += 1
-            except Exception:  # noqa: BLE001
-                pass
-    return count
+    row_nums = [n for n, r in enumerate(rows, 1)
+                if n >= FIRST_DATA_ROW and norm_name(_cell(r, 2)) == want]
+    if not row_nums:
+        return 0
+    gid = _sheet_gid(sh_id, sheet_title)
+    requests = [{
+        "repeatCell": {
+            "range": {"sheetId": gid,
+                      "startRowIndex": n - 1, "endRowIndex": n,
+                      "startColumnIndex": 2, "endColumnIndex": 3},
+            "cell": {"userEnteredFormat": {
+                "textFormat": {"foregroundColor": color}}},
+            "fields": "userEnteredFormat.textFormat.foregroundColor",
+        }
+    } for n in row_nums[:900]]
+    try:
+        sheets().spreadsheets().batchUpdate(
+            spreadsheetId=sh_id, body={"requests": requests}).execute()
+    except Exception as e:  # noqa: BLE001
+        log(f"Не покрасил имя репетитора: {e}")
+        return 0
+    return len(requests)
 
 
 def set_tutor_color(tutor: str, color_text: str) -> tuple[bool, int]:
@@ -742,35 +756,43 @@ def id_prefix() -> str:
 
 
 def _ids_from_all() -> list[str]:
-    """Все ID из листов занятий + «Чеки Репет»."""
+    """Все ID из листов занятий + «Чеки Репет» (пакетное чтение)."""
+    from sheets_util import get_values_batch
     cfg = load_config()
     hist_id = cfg["sheets"]["history"]
+    recept_id = cfg["sheets"]["recept"]
     out: list[str] = []
+
+    def _titles() -> list[str]:
+        from sheets_util import sheets
+        try:
+            meta = sheets().spreadsheets().get(spreadsheetId=hist_id).execute()
+            titles = [s["properties"]["title"] for s in meta.get("sheets", [])]
+        except Exception:  # noqa: BLE001
+            titles = []
+        found = [t for t in titles
+                 if t == "Занятия" or t == "История" or t.startswith("История ")]
+        if not found:
+            found = [(_write_cfg().get("history_sheet")
+                      or TARGET_HISTORY_SHEET)]
+        return found
+
     try:
-        rows = get_values(hist_id, f"'{(_write_cfg().get('history_sheet') or TARGET_HISTORY_SHEET)}'!A1:L")
-        out += [str(r[11]).strip() for r in rows[1:] if len(r) > 11 and str(r[11]).strip()]
-    except Exception:  # noqa: BLE001
-        pass
-    try:
-        meta = __import__("sheets_util").sheets().spreadsheets().get(
-            spreadsheetId=hist_id).execute()
-        for s in meta.get("sheets", []):
-            t = s["properties"]["title"]
-            if not (t == "Занятия" or t == "История"
-                    or t.startswith("История ")):
-                continue
-            rows = get_values(hist_id, f"'{t}'!A1:L")
-            out += [str(r[11]).strip() for r in rows[1:]
+        titles = _titles()
+        for vals in get_values_batch(hist_id,
+                                     [f"'{t}'!A1:L" for t in titles]):
+            out += [str(r[11]).strip() for r in vals[1:]
                     if len(r) > 11 and str(r[11]).strip()]
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as e:  # noqa: BLE001
+        log(f"ID: не прочитал «Историю»: {e}")
+
     try:
-        rec = cfg["sheets"]["recept"]
-        rows = get_values(rec, f"'{cfg['sheets']['recept_checks_sheet']}'!A1:L")
-        out += [str(r[11]).strip() for r in rows[1:]
+        vals = get_values_batch(
+            recept_id, [f"'{cfg['sheets']['recept_checks_sheet']}'!A1:L"])[0]
+        out += [str(r[11]).strip() for r in vals[1:]
                 if len(r) > 11 and str(r[11]).strip()]
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as e:  # noqa: BLE001
+        log(f"ID: не прочитал «Чеки»: {e}")
     return out
 
 
@@ -804,8 +826,8 @@ def global_max_id() -> int:
 def ensure_checks_ids() -> int:
     """Проставить ID (колонка L) строкам «Чеки Репет» / «Чеки».
 
-    Нумерация: префикс сегодняшней даты + счётчик (12111, 12112, …).
-    Возвращает, сколько ID добавлено.
+    ID уникальны по всем листам: счётчик продолжает существующие номера,
+    а занятый ID никогда не выдаётся повторно.
     """
     cfg = load_config()
     sh_id = cfg["sheets"]["recept"]
@@ -816,17 +838,49 @@ def ensure_checks_ids() -> int:
         return 0
     if not rows:
         return 0
-    prefix = id_prefix()
-    mx = 0
-    for row in rows[1:]:
-        if len(row) > 11 and str(row[11]).strip().startswith(prefix):
-            tail = str(row[11]).strip()[len(prefix):]
-            if tail.isdigit():
-                mx = max(mx, int(tail))
-    # шапка «Чеков» защищена — пишем только по одной строке, пропуская ошибки
+
+    # все уже занятые ID (по всем листам) и максимум по префиксам
+    used: set[str] = set()
+    max_by_prefix: dict[str, int] = {}
+    try:
+        for _sh, _t in _all_sheet_targets():
+            try:
+                vals = get_values(_sh, f"'{_t}'!A1:L")
+            except Exception:  # noqa: BLE001
+                continue
+            for r in vals[1:]:
+                lid = str(r[11]).strip() if len(r) > 11 else ""
+                if not lid or lid == "ID занятия":
+                    continue
+                used.add(lid)
+                pre = lid[:-1] if lid[-1].isdigit() else ""
+                # префикс — цифры даты DDMM перед счётчиком
+                pass
+    except Exception as e:  # noqa: BLE001
+        log(f"ID: не собрал занятые номера: {e}")
+
+    def _max_counter(prefix: str) -> int:
+        mx = 0
+        for lid in used:
+            if lid.startswith(prefix) and lid[len(prefix):].isdigit():
+                mx = max(mx, int(lid[len(prefix):]))
+        return mx
+
+    counters: dict[str, int] = {}
+
+    def _next_id(prefix: str) -> str:
+        if prefix not in counters:
+            counters[prefix] = _max_counter(prefix)
+        while True:
+            counters[prefix] += 1
+            cand = prefix + str(counters[prefix])
+            if cand not in used:
+                used.add(cand)
+                return cand
+
+    today_prefix = id_prefix()
     added = 0
     failed = 0
-    counter: dict[str, int] = {}
     for n, row in enumerate(rows):
         if n == 0:
             continue
@@ -836,16 +890,12 @@ def ensure_checks_ids() -> int:
         has_data = len(row) >= 4 and (str(row[2]).strip() or str(row[3]).strip())
         if not has_data:
             continue
-        # префикс — из даты самой строки, иначе старые записи получают
-        # сегодняшнюю дату в ID и путают поиск
-        row_prefix = prefix
+        row_prefix = today_prefix
         d = _parse_day(row[1]) if len(row) > 1 else None
         if isinstance(d, dt.date):
             row_prefix = f"{d.day}{d.month:02d}"
-        counter[row_prefix] = counter.get(row_prefix, 0) + 1
         try:
-            update_values(sh_id, f"'{title}'!L{n + 1}",
-                          [[row_prefix + str(counter[row_prefix])]])
+            update_values(sh_id, f"'{title}'!L{n + 1}", [[_next_id(row_prefix)]])
             added += 1
         except Exception:  # noqa: BLE001
             failed += 1
