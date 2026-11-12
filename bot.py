@@ -470,6 +470,39 @@ def _student_link(s: dict, kind: str) -> str:
     return url
 
 
+def _already_recorded(tutor: str, date_s: str, time_s: str,
+                      student: str) -> bool:
+    """Есть ли уже точно такая запись (репетитор+дата+время+ученик)."""
+    try:
+        day = dt.datetime.strptime(str(date_s), "%d.%m.%Y").date()
+    except (ValueError, TypeError):
+        return False
+    try:
+        for x in checks_writer.read_lessons():
+            if (names_match(x.get("репетитор", ""), tutor)
+                    and x.get("дата") == day
+                    and str(x.get("время", "")).strip() == str(time_s).strip()
+                    and names_match(x.get("ученик", ""), student)):
+                return True
+    except Exception:  # noqa: BLE001
+        return False
+    return False
+
+
+def _where(p: dict) -> dict:
+    """Параметры точного поиска ученика (строка + родитель)."""
+    kw: dict = {}
+    row = p.get("row")
+    if row:
+        try:
+            kw["where_row"] = int(row)
+        except (TypeError, ValueError):
+            pass
+    if p.get("родитель"):
+        kw["match_parent"] = p["родитель"]
+    return kw
+
+
 def _card_text(s: dict, sched: str, html_mode: bool = False) -> str:
     """Карточка ученика. Имя — кликабельная ссылка (синяя), без показа URL."""
     name = s.get("ученик", "")
@@ -1300,6 +1333,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                show_alert=True)
                 return
             await q.answer()
+            if _already_recorded(entry["репетитор"], date_s,
+                                 entry["время"], entry["ученик"]):
+                await q.edit_message_text(
+                    f"ℹ️ Это занятие уже записано ({date_s}).")
+                return
             try:
                 checks_writer.append_check({
                     "время": entry["время"], "дата": date_s,
@@ -1330,6 +1368,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                show_alert=True)
                 return
             await q.answer()
+            if _already_recorded(entry["репетитор"], date_s,
+                                 entry["время"], entry["ученик"]):
+                await q.edit_message_text(
+                    f"ℹ️ Это занятие уже записано ({date_s}).")
+                return
             try:
                 checks_writer.append_check({
                     "время": entry["время"], "дата": date_s,
@@ -3476,7 +3519,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if step == "правка_comment":
         tutor = p.get("репетитор") or name_by_id(user.id) or ""
         students_module.update_student(tutor, p.get("ученик", ""),
-                                       comment=text[:300])
+                                       comment=text[:300], **_where(p))
         set_pending(user.id, None)
         await _send(update, "✅ Комментарий сохранён.",
                     reply_markup=kb([[("⬅️ К ученикам", "students")]]))
@@ -3514,10 +3557,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not saved:
             if step == "правка_link_student":
                 saved = students_module.update_student(
-                    tutor, student, student_link=link)
+                    tutor, student, student_link=link, **_where(p))
             else:
                 saved = students_module.update_student(
-                    tutor, student, parent_link=link)
+                    tutor, student, parent_link=link, **_where(p))
         set_pending(user.id, None)
         try:
             await _delete_prev(update, context)
@@ -3544,15 +3587,19 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if amt is None:
                 await _send(update, "Напишите число, например 1700.")
                 return
-            students_module.update_student(tutor, student, rate=str(amt))
+            students_module.update_student(tutor, student, rate=str(amt),
+                                           **_where(p))
         elif step == "правка_parent":
-            students_module.update_student(tutor, student, parent=norm_name(text)[:60])
+            students_module.update_student(tutor, student,
+                                           parent=norm_name(text)[:60],
+                                           **_where(p))
         else:
             new_name = norm_name(text)[:60]
             if len(new_name) < 2:
                 await _send(update, "Слишком коротко.")
                 return
-            students_module.update_student(tutor, student, new_name=new_name)
+            students_module.update_student(tutor, student,
+                                           new_name=new_name, **_where(p))
         set_pending(user.id, None)
         await _send(update, 
             "✅ Сохранено.", reply_markup=kb([[("⬅️ К ученикам", "students")]]))
