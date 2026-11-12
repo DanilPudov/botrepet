@@ -284,6 +284,13 @@ def append_check(record: dict) -> int:
             set_lesson_paid(_lid, False, title=title)
         except Exception as e:  # noqa: BLE001
             log(f"Не удалось покрасить сумму в красный: {e}")
+    # цвет имени репетитора, если настроен
+    try:
+        _tcolor = get_tutor_color(tutor)
+        if _tcolor is not None:
+            _color_cell(sh_id, title, row_num, 2, _tcolor)
+    except Exception as e:  # noqa: BLE001
+        log(f"Не смог покрасить имя репетитора: {e}")
     return row_num
 
 
@@ -497,6 +504,91 @@ def set_name_color(lesson_id, color_text: str,
     invalidate_cache()
     log(f"ЦВЕТ имени {lesson_id} ({sheet_title}): {color_text}")
     return True
+
+
+def get_tutor_color(tutor: str) -> dict | None:
+    """Сохранённый цвет имени репетитора (из настроек)."""
+    from sheets_util import load_state
+    colors = (load_state().get("tutor_colors") or {})
+    raw = colors.get(str(tutor or "").strip().lower())
+    return parse_color(raw) if raw else None
+
+
+def _color_cell(sh_id: str, sheet_title: str, row: int, column: int,
+                color: dict) -> None:
+    """Покрасить текст одной ячейки (column: 0=A, 2=C, 3=D)."""
+    from sheets_util import sheets
+    sheets().spreadsheets().batchUpdate(
+        spreadsheetId=sh_id,
+        body={"requests": [{
+            "repeatCell": {
+                "range": {
+                    "sheetId": _sheet_gid(sh_id, sheet_title),
+                    "startRowIndex": row - 1,
+                    "endRowIndex": row,
+                    "startColumnIndex": column,
+                    "endColumnIndex": column + 1,
+                },
+                "cell": {"userEnteredFormat": {
+                    "textFormat": {"foregroundColor": color}}},
+                "fields": "userEnteredFormat.textFormat.foregroundColor",
+            }
+        }]}).execute()
+
+
+def apply_tutor_color(tutor: str, color: dict | None = None) -> int:
+    """Покрасить имя репетитора (колонка C) во всех его занятиях.
+
+    color=None — взять сохранённый цвет. Возвращает число строк.
+    """
+    if color is None:
+        color = get_tutor_color(tutor)
+    if color is None:
+        return 0
+    sh_id, sheet_title = _target(tutor)
+    try:
+        rows = get_values(sh_id, f"'{sheet_title}'!A1:L")
+    except Exception:  # noqa: BLE001
+        return 0
+    count = 0
+    want = norm_name(str(tutor or ""))
+    for n, r in enumerate(rows, 1):
+        if n < FIRST_DATA_ROW:
+            continue
+        if norm_name(_cell(r, 2)) == want:
+            try:
+                _color_cell(sh_id, sheet_title, n, 2, color)
+                count += 1
+            except Exception:  # noqa: BLE001
+                pass
+    return count
+
+
+def set_tutor_color(tutor: str, color_text: str) -> tuple[bool, int]:
+    """Сохранить цвет репетитора и покрасить существующие строки."""
+    from sheets_util import load_state, save_state
+    color = parse_color(color_text)
+    if color is None:
+        return False, 0
+    st = load_state()
+    st.setdefault("tutor_colors", {})[str(tutor or "").strip().lower()] = \
+        str(color_text).strip()
+    save_state(st)
+    count = apply_tutor_color(tutor, color)
+    log(f"ЦВЕТ репетитора {tutor}: {color_text} (строк: {count})")
+    return True, count
+
+
+def get_row_lids(row_num: int, title: str | None = None) -> str:
+    """ID занятия (колонка L) по номеру строки. Пустая строка, если нет."""
+    sh_id, sheet_title = _sheet_spreadsheet(title)
+    try:
+        vals = get_values(sh_id, f"'{sheet_title}'!L{row_num}")
+    except Exception:  # noqa: BLE001
+        return ""
+    if not vals or not vals[0]:
+        return ""
+    return str(vals[0][0]).strip()
 
 
 def set_lesson_paid(lesson_id, paid: bool, title: str | None = None) -> bool:
