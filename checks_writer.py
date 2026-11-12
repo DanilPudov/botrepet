@@ -162,7 +162,11 @@ def next_lesson_id(title: str | None = None) -> int:
 
 def find_next_free_row(title: str | None = None,
                        sh_id: str | None = None) -> int:
-    """Строка после ПОСЛЕДНЕЙ занятой (пустые строки в середине не занимаем)."""
+    """Первая строка, где нет занятия (ключевые поля пусты).
+
+    Пустые строки с «нет/Отлично/Да» по умолчанию занятыми не считаются —
+    иначе бот писал бы далеко вниз, и записи терялись из виду.
+    """
     if sh_id is None:
         sh_id, default_title = _target()
         title = title or default_title
@@ -175,8 +179,11 @@ def find_next_free_row(title: str | None = None,
     for n, row in enumerate(rows, start=1):
         if n < FIRST_DATA_ROW:
             continue
-        if any(_cell(row, i) for i in range(12)):  # занята, если что-то в A..L
+        if any(_cell(row, i) for i in (0, 1, 2, 3, 5, 11)):
             last = n
+        elif last >= FIRST_DATA_ROW:
+            # нашли дырку после данных — пишем в неё
+            return n
     return max(last + 1, FIRST_DATA_ROW)
 
 
@@ -411,6 +418,85 @@ def _find_lesson_anywhere(lesson_id) -> tuple[str, str, int] | None:
             if str(row[11]).strip() == lid:
                 return sh_id, title, n
     return None
+
+
+NAME_COLORS = {
+    "белый": {"red": 1, "green": 1, "blue": 1},
+    "чёрный": {"red": 0, "green": 0, "blue": 0},
+    "черный": {"red": 0, "green": 0, "blue": 0},
+    "красный": {"red": 0.9, "green": 0.1, "blue": 0.1},
+    "зелёный": {"red": 0.0, "green": 0.6, "blue": 0.0},
+    "зеленый": {"red": 0.0, "green": 0.6, "blue": 0.0},
+    "синий": {"red": 0.1, "green": 0.3, "blue": 0.85},
+    "голубой": {"red": 0.2, "green": 0.65, "blue": 0.9},
+    "жёлтый": {"red": 0.95, "green": 0.75, "blue": 0.0},
+    "желтый": {"red": 0.95, "green": 0.75, "blue": 0.0},
+    "оранжевый": {"red": 0.95, "green": 0.5, "blue": 0.0},
+    "фиолетовый": {"red": 0.55, "green": 0.25, "blue": 0.85},
+    "розовый": {"red": 0.95, "green": 0.45, "blue": 0.7},
+    "серый": {"red": 0.5, "green": 0.5, "blue": 0.5},
+}
+
+
+def parse_color(text: str) -> dict | None:
+    """Цвет из названия («красный») или HEX (#FF0000 / FF0000 / F00)."""
+    s = str(text or "").strip().lower().replace("ё", "е")
+    if not s:
+        return None
+    if s in NAME_COLORS:
+        return NAME_COLORS[s]
+    for name, color in NAME_COLORS.items():
+        if name.replace("ё", "е") == s:
+            return color
+    hex_part = s.lstrip("#")
+    if len(hex_part) == 3 and all(c in "0123456789abcdef" for c in hex_part):
+        hex_part = "".join(c * 2 for c in hex_part)
+    if len(hex_part) == 6 and all(c in "0123456789abcdef" for c in hex_part):
+        return {
+            "red": int(hex_part[0:2], 16) / 255.0,
+            "green": int(hex_part[2:4], 16) / 255.0,
+            "blue": int(hex_part[4:6], 16) / 255.0,
+        }
+    return None
+
+
+def set_name_color(lesson_id, color_text: str,
+                   title: str | None = None) -> bool:
+    """Покрасить имя ученика (колонка D) в заданный цвет."""
+    color = parse_color(color_text)
+    if color is None:
+        return False
+    found = None
+    if title:
+        sh, t = _sheet_spreadsheet(title)
+        row_num = _find_row_by_lesson_id(lesson_id, title)
+        if row_num:
+            found = (sh, t, row_num)
+    if not found:
+        found = _find_lesson_anywhere(lesson_id)
+    if not found:
+        return False
+    from sheets_util import sheets
+    sh_id, sheet_title, row = found
+    sheets().spreadsheets().batchUpdate(
+        spreadsheetId=sh_id,
+        body={"requests": [{
+            "repeatCell": {
+                "range": {
+                    "sheetId": _sheet_gid(sh_id, sheet_title),
+                    "startRowIndex": row - 1,
+                    "endRowIndex": row,
+                    "startColumnIndex": 3,   # D — имя ученика
+                    "endColumnIndex": 4,
+                },
+                "cell": {"userEnteredFormat": {
+                    "textFormat": {"foregroundColor": color}}},
+                "fields": "userEnteredFormat.textFormat.foregroundColor",
+            }
+        }]}).execute()
+    invalidate_cache()
+    log(f"ЦВЕТ имени {lesson_id} ({sheet_title}): {color_text}")
+    return True
 
 
 def set_lesson_paid(lesson_id, paid: bool, title: str | None = None) -> bool:
