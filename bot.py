@@ -528,9 +528,11 @@ async def show_student_card(update: Update, context: ContextTypes.DEFAULT_TYPE,
                             tutor: str, student: str) -> None:
     """Карточка ученика с кнопками правки."""
     user = update.effective_user
-    s = students_module.find_student(tutor, student) or {
+    s = students_module.find_student(
+        tutor, student, parent=(get_pending(user.id) or {}).get("родитель", "")) or {
         "ученик": student, "родитель": "", "тариф": "", "комментарий": ""}
     set_pending(user.id, {"шаг": "карточка_ученика", "ученик": s["ученик"],
+                          "родитель": s.get("родитель", ""),
                           "репетитор": tutor, "row": s.get("row")})
     text = _card_text(s, _schedule_summary(tutor, s["ученик"]), html_mode=True)
     await _say(update, text, parse_mode=ParseMode.HTML, reply_markup=kb([
@@ -552,7 +554,8 @@ async def show_student_schedule(update: Update, context: ContextTypes.DEFAULT_TY
     tutor = p.get("репетитор") or name_by_id(user.id) or ""
     student = p.get("ученик", "")
     entries = schedule_module.entries_for(tutor, student) if tutor and student else []
-    s = students_module.find_student(tutor, student) or {
+    s = students_module.find_student(
+        tutor, student, parent=p.get("родитель", "")) or {
         "ученик": student, "родитель": "", "тариф": "", "комментарий": ""}
     rows = []
     for e in entries:
@@ -566,8 +569,12 @@ async def show_student_schedule(update: Update, context: ContextTypes.DEFAULT_TY
         # Нет выбранного ученика (например, вернулись из расписания) — не рисуем пустую анкету
         await show_main(update, context, edit=(update.callback_query is not None))
         return
-    text = (f"🧒 <b>{s['ученик']}</b>\n"
-            f"Родитель: {s.get('родитель') or '—'}\n"
+    _su = _student_link(s, "s")
+    _pu = _student_link(s, "p")
+    _name_h = links_module.link_html(_su, s["ученик"])
+    _par_h = links_module.link_html(_pu, s.get("родитель") or "") or "—"
+    text = (f"🧒 <b>{_name_h}</b>\n"
+            f"Родитель: {_par_h}\n"
             f"Цена занятия: {s.get('тариф') + ' ₽' if s.get('тариф') else '—'}\n"
             f"Комментарий: {s.get('комментарий') or '—'}\n\n"
             + ("⏰ <b>Занятия:</b>\n" +
@@ -769,10 +776,9 @@ async def schedule_view(user_id: int, days: int) -> tuple[str, list[list[tuple[s
         return html.escape(str(v or ""))
 
     try:
-        _students = {norm_name(s["ученик"]): s
-                     for s in students_module.students_of(tutor)}
+        _students = list(students_module.students_of(tutor))
     except Exception:  # noqa: BLE001
-        _students = {}
+        _students = []
 
     def _link(url: str, label: str) -> str:
         url = (url or "").strip()
@@ -780,11 +786,29 @@ async def schedule_view(user_id: int, days: int) -> tuple[str, list[list[tuple[s
             return f'<a href="{esc(url)}">{esc(label)}</a>'
         return esc(label)
 
+    def _match_student(name: str, parent: str = "") -> dict:
+        """Ученик по имени, при тёзках — по родителю (иначе без ссылок)."""
+        want = norm_name(name)
+        same = [s for s in _students
+                if norm_name(s.get("ученик", "")) == want
+                or names_match(s.get("ученик", ""), name)]
+        if not same:
+            return {}
+        if len(same) == 1:
+            return same[0]
+        if parent:
+            wp = norm_name(parent)
+            by_par = [s for s in same
+                      if norm_name(s.get("родитель", "")) == wp]
+            if len(by_par) == 1:
+                return by_par[0]
+        return {}
+
     def who_html(e: dict) -> str:
         name = e.get("ученик", "")
-        st = _students.get(norm_name(name), {})
-        out = _link(st.get("ссылка_ученика", ""), name)
         parent = e.get("родитель", "")
+        st = _match_student(name, parent)
+        out = _link(st.get("ссылка_ученика", ""), name)
         if parent:
             out += " (" + _link(st.get("ссылка_родителя", ""), parent) + ")"
         return out
@@ -819,9 +843,7 @@ async def schedule_view(user_id: int, days: int) -> tuple[str, list[list[tuple[s
             parts.append(f"*{schedule_module.DAY_NAMES[day.weekday()]} "
                          f"{day:%d.%m}*{mark} — {len(items) - _cc} зан.")
             for e in sorted(items, key=lambda x: _time_key(x.get("время", ""))):
-                who = e.get("ученик", "")
-                if e.get("родитель"):
-                    who += f" ({e['родитель']})"
+                who = who_html(e)      # имена — кликабельные ссылки
                 price = f" — {e['цена']} ₽" if e.get("цена") else ""
                 _single = schedule_module.one_time_date(str(e.get("дни", "")))
                 _t = str(e.get("время", ""))
@@ -3045,6 +3067,10 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+    try:
+        await _maybe_send_note(context.bot, user.id)
+    except Exception:  # noqa: BLE001
+        pass
     text = (update.message.text or "").strip()
     try:
         for ent in (getattr(update.message, "entities", None) or []):
@@ -3758,11 +3784,22 @@ async def show_students_list(update: Update, context: ContextTypes.DEFAULT_TYPE)
         label = s["ученик"] + (f" — {s['родитель']}" if s.get("родитель") else "")
         price = f" · {s['тариф']} ₽" if s.get("тариф") else ""
         rows.append([(label + price, f"student:{i}")])
-    text = ("👥 *Мои ученики*\n\nНажмите на ученика, чтобы изменить имя, "
-            "родителя или цену." if roster else
-            "👥 *Мои ученики*\n\nПока пусто. Добавьте первого.")
+    if roster:
+        lines = []
+        for s in roster:
+            su = links_module.dialog_link(s.get("ссылка_ученика", "") or "")
+            pu = links_module.dialog_link(s.get("ссылка_родителя", "") or "")
+            nm = links_module.link_html(su, s["ученик"])
+            par = s.get("родитель") or ""
+            par_h = links_module.link_html(pu, par) if par else "—"
+            price = f" · {s['тариф']} ₽" if s.get("тариф") else ""
+            lines.append(f"• {nm} ({par_h}){price}")
+        text = ("👥 <b>Мои ученики</b>\n\n" + "\n".join(lines)
+                + "\n\nНажмите на ученика ниже, чтобы изменить данные.")
+    else:
+        text = "👥 <b>Мои ученики</b>\n\nПока пусто. Добавьте первого."
     rows.append([("➕ Добавить ученика", "add_student2"), ("⬅️ Назад", "nav:back")])
-    await _say(update, text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb(rows))
+    await _say(update, text, parse_mode=ParseMode.HTML, reply_markup=kb(rows))
 
 
 async def show_mine_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3801,7 +3838,9 @@ async def show_mine_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         parts.append(f"<b>{title}</b>")
         for x in by_day[day]:
             tm = f" {x['время']}" if x["время"] else ""
-            stud = students_module.find_student(tutor, x["ученик"]) or {}
+            stud = students_module.find_student(
+            tutor, x["ученик"],
+            parent=x.get("родитель") or "") or {}
             par = (stud.get("родитель") or x.get("родитель") or "").strip()
             su = links_module.dialog_link(stud.get("ссылка_ученика", "") or "")
             pu = links_module.dialog_link(stud.get("ссылка_родителя", "") or "")
@@ -3860,7 +3899,9 @@ async def show_past_week(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         lid = str(x.get("id") or "")
         st = flags.get(lid, "")
         mark = "✅" if st == "paid" else ("❌" if st == "no" else "⚪️")
-        stud = students_module.find_student(tutor, x["ученик"]) or {}
+        stud = students_module.find_student(
+            tutor, x["ученик"],
+            parent=x.get("родитель") or "") or {}
         par = (stud.get("родитель") or x.get("родитель") or "").strip()
         su = links_module.dialog_link(stud.get("ссылка_ученика", "") or "")
         pu = links_module.dialog_link(stud.get("ссылка_родителя", "") or "")
@@ -3903,17 +3944,26 @@ async def show_mine_records(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                and week_start <= x["дата"] <= week_end]
     lessons.sort(key=lambda x: (x["дата"], _time_key(x["время"])))
     rows = []
+    lines: list[str] = []
     for x in lessons:
         lid = str(x.get("id") or "")
-        stud = students_module.find_student(tutor, x["ученик"]) or {}
+        stud = students_module.find_student(
+            tutor, x["ученик"],
+            parent=x.get("родитель") or "") or {}
         par = (stud.get("родитель") or "").strip()
+        su = links_module.dialog_link(stud.get("ссылка_ученика", "") or "")
+        pu = links_module.dialog_link(stud.get("ссылка_родителя", "") or "")
+        nm = links_module.link_html(su, x["ученик"])
+        par_h = (" (" + links_module.link_html(pu, par) + ")") if par else ""
+        lines.append(f"• {x['дата']:%d.%m} {nm}{par_h} — {x['сумма']} ₽")
         label = (f"{x['дата']:%d.%m} {x['ученик']}"
                  + (f" ({par})" if par else "")
                  + f" — {x['сумма']} ₽")
         rows.append([(label[:40], f"mact:{lid}" if lid else "noop")])
     rows.append([("⬅️ Назад", "mine")])
-    text = ("*Изменить запись*\n\nНажмите на запись:" if rows else "Записей нет.")
-    await _say(update, text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb(rows))
+    text = ("<b>Изменить запись</b>\n\n" + "\n".join(lines)
+            + "\n\nНажмите на запись ниже:") if lines else "Записей нет."
+    await _say(update, text, parse_mode=ParseMode.HTML, reply_markup=kb(rows))
 
 
 async def mine_report(user_id: int) -> str:
@@ -4179,12 +4229,25 @@ def _chat_id_by_tutor(tutor: str) -> int | None:
     return None
 
 
-async def notify_update(context_or_app) -> None:
-    """Разослать всем краткое уведомление об обновлении.
+def _note_brief(note: str) -> str:
+    """Краткий текст уведомления из файла заметки."""
+    lines = [ln.strip() for ln in note.split("\n") if ln.strip()]
+    if not lines:
+        return ""
+    head = lines[0]
+    bullets = [ln for ln in lines[1:]
+               if ln[:1].isdigit() or ln.startswith(("•", "-"))]
+    if not bullets:
+        return head
+    return head + "\n\n" + "\n".join(
+        b if len(b) <= 90 else b[:87] + "..." for b in bullets[:5])
 
-    Заметка берётся из DATA_DIR/update_note.txt или из папки бота
-    (файл в репозитории — удобно обновлять через GitHub).
-    Повторно после перезапуска не отправляется: запоминается отпечаток.
+
+async def notify_update(context_or_app) -> None:
+    """Запомнить уведомление об обновлении, но НЕ рассылать сразу.
+
+    Рассылка идёт, когда репетитор сам нажмёт любую кнопку или напишет —
+    чтобы не отвлекать людей без повода.
     """
     import hashlib
 
@@ -4205,12 +4268,11 @@ async def notify_update(context_or_app) -> None:
             pass
         return
 
-    # отпечаток: не отправлять одно и то же дважды
     digest = hashlib.sha1(note.encode("utf-8")).hexdigest()[:16]
     marker = sheets_util.DATA_DIR / "update_note.sent"
     try:
         if marker.exists() and marker.read_text(encoding="utf-8").strip() == digest:
-            log("Уведомление об обновлении уже отправлено ранее")
+            log("Уведомление об обновлении уже разослано ранее")
             try:
                 note_path.unlink()
             except OSError:
@@ -4219,53 +4281,63 @@ async def notify_update(context_or_app) -> None:
     except OSError:
         pass
 
-    cfg = load_config()
-    bot_obj = getattr(context_or_app, "bot", context_or_app)
-    # краткая версия: первая строка-заголовок + до 5 пунктов по 1 строке
-    lines = [ln.strip() for ln in note.split("\n") if ln.strip()]
-    head = lines[0] if lines else "🤖 Бот обновлён"
-    bullets = [ln for ln in lines[1:]
-               if ln[:1].isdigit() or ln.startswith(("•", "-"))]
-    brief = head
-    if bullets:
-        brief += "\n\n" + "\n".join(
-            b if len(b) <= 90 else b[:87] + "..." for b in bullets[:5])
-    # только «Отлично»: «Домой» здесь дублирует её по смыслу
-    markup = kb([[("Отлично", "dismiss")]], home=False)
-
-    targets: list[int] = []
-    for oid in cfg.get("owner_ids", []):
-        try:
-            t = int(oid)
-        except (ValueError, TypeError):
-            continue
-        if t not in targets:
-            targets.append(t)
-    for t in load_state().get("tutors", []):
-        try:
-            tid = int(t["id"])
-        except (KeyError, ValueError, TypeError):
-            continue
-        if tid not in targets:
-            targets.append(tid)
-
-    for tid in targets:
-        try:
-            await bot_obj.send_message(chat_id=tid, text=brief,
-                                       reply_markup=markup)
-            log(f"Уведомление об обновлении отправлено {tid}")
-        except Exception as e:  # noqa: BLE001
-            log(f"Не смог отправить уведомление {tid}: {e}")
-
-    try:
-        marker.write_text(digest, encoding="utf-8")
-    except OSError:
-        pass
+    brief = _note_brief(note)
+    if not brief:
+        return
+    st = load_state()
+    st["pending_note"] = {"text": brief, "digest": digest, "sent": []}
+    save_state(st)
+    log("Уведомление об обновлении отложено до действия пользователя")
     try:
         note_path.unlink()
     except OSError:
         pass
 
+
+async def _maybe_send_note(bot_obj, user_id) -> None:
+    """Отправить отложенное уведомление этому пользователю (один раз)."""
+    try:
+        st = load_state()
+        note = st.get("pending_note") or {}
+        text = (note.get("text") or "").strip()
+        if not text:
+            return
+        sent = [str(x) for x in (note.get("sent") or [])]
+        uid = str(user_id)
+        if uid in sent:
+            return
+        cfg = load_config()
+        allowed: set[str] = set()
+        for oid in cfg.get("owner_ids", []):
+            try:
+                allowed.add(str(int(oid)))
+            except (ValueError, TypeError):
+                continue
+        for t in st.get("tutors", []):
+            try:
+                allowed.add(str(int(t["id"])))
+            except (KeyError, ValueError, TypeError):
+                continue
+        if uid not in allowed:
+            return
+        await bot_obj.send_message(
+            chat_id=int(user_id), text=text,
+            reply_markup=kb([[("Отлично", "dismiss")]], home=False))
+        sent.append(uid)
+        note["sent"] = sent
+        st["pending_note"] = note
+        save_state(st)
+        log(f"Уведомление об обновлении отправлено {user_id}")
+        if allowed <= set(sent):
+            st.pop("pending_note", None)
+            save_state(st)
+            try:
+                (sheets_util.DATA_DIR / "update_note.sent").write_text(
+                    note.get("digest", ""), encoding="utf-8")
+            except OSError:
+                pass
+    except Exception as e:  # noqa: BLE001
+        log(f"Не смог отправить отложенное уведомление: {e}")
 
 
 async def post_init(app: Application):
