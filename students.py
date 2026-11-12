@@ -136,15 +136,30 @@ def add_student(tutor: str, student: str, parent: str = "", rate: str = "",
     return row_num
 
 
-def find_student(tutor: str, student: str) -> dict | None:
+def find_student(tutor: str, student: str,
+                 parent: str | None = None) -> dict | None:
+    """Найти ученика. При одинаковых именах — различать по родителю.
+
+    Если имя совпало у нескольких учеников, а родитель не указан,
+    возвращаем None: лучше попросить уточнить, чем записать не тому.
+    """
+    roster = students_of(tutor)
     want = norm_name(student)
-    for s in students_of(tutor):
-        if norm_name(s["ученик"]) == want:
-            return s
-    # порядок слов может отличаться — сравниваем нестрого
-    for s in students_of(tutor):
-        if names_match(s["ученик"], student):
-            return s
+    exact = [s for s in roster if norm_name(s["ученик"]) == want]
+    if not exact:
+        exact = [s for s in roster if names_match(s["ученик"], student)]
+    if not exact:
+        return None
+    if len(exact) == 1:
+        return exact[0]
+    # несколько тёзок — выбираем по родителю
+    if parent:
+        wp = norm_name(parent)
+        by_parent = [s for s in exact
+                     if norm_name(s.get("родитель", "")) == wp
+                     or names_match(s.get("родитель", ""), parent)]
+        if len(by_parent) == 1:
+            return by_parent[0]
     return None
 
 
@@ -158,11 +173,26 @@ def update_student(tutor: str, student: str, *, new_name: str | None = None,
                    comment: str | None = None,
                    student_link: str | None = None,
                    parent_link: str | None = None,
-                   sender: str | None = None) -> bool:
-    """Меняет имя/родителя/тариф/отправителя ученика. True, если нашёл."""
-    row = _find_row(tutor, student)
+                   sender: str | None = None,
+                   where_row: int | None = None,
+                   match_parent: str | None = None) -> bool:
+    """Меняет имя/родителя/тариф/отправителя ученика. True, если нашёл.
+
+    where_row — точная строка из карточки (надёжнее поиска по имени).
+    match_parent — родитель для различения одинаковых имён.
+    """
+    if where_row:
+        try:
+            row = int(where_row)
+        except (TypeError, ValueError):
+            row = None
+    else:
+        row = None
     if row is None:
-        return False
+        found = find_student(tutor, student, parent=match_parent)
+        if not found:
+            return False
+        row = found["row"]
     cfg = load_config()
     sh_id = cfg["sheets"]["history"]
     cur = find_student(tutor, student) or {}
