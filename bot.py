@@ -1022,6 +1022,32 @@ def set_pending(user_id: int, data: dict | None):
     save_state(state)
 
 
+async def _cleanup_tracked(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                           keep_id: int | None = None) -> None:
+    """Удалить все ранее отправленные ботом сообщения-подсказки.
+
+    keep_id — сообщение, которое сейчас редактируется (его не трогаем).
+    """
+    user = update.effective_user
+    if user is None:
+        return
+    st = load_state()
+    ids = (st.get("bot_msgs") or {}).get(str(user.id), [])
+    if not ids:
+        return
+    left: list[int] = []
+    for mid in ids:
+        if keep_id is not None and mid == keep_id:
+            left.append(mid)
+            continue
+        try:
+            await context.bot.delete_message(chat_id=user.id, message_id=mid)
+        except Exception:  # noqa: BLE001 — старое/уже удалено
+            pass
+    st.setdefault("bot_msgs", {})[str(user.id)] = left
+    save_state(st)
+
+
 async def _cleanup_extras(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Удалить «лишние» сообщения бота (например, вторая часть месяца)."""
     user = update.effective_user
@@ -1122,6 +1148,13 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data not in ("noop",):
         try:
             await _cleanup_extras(update, context)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            keep = None
+            if q.message is not None:
+                keep = q.message.message_id
+            await _cleanup_tracked(update, context, keep_id=keep)
         except Exception:  # noqa: BLE001
             pass
     role = role_of(user.id)
@@ -1410,6 +1443,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await _delete_prev(update, context)
         except Exception:  # noqa: BLE001
             pass
+        try:
+            await _cleanup_tracked(update, context)
+        except Exception:  # noqa: BLE001
+            pass
         p = get_pending(user.id) or {}
         p["шаг"] = "заметка"
         p["репетитор"] = name_by_id(user.id) or ""
@@ -1475,10 +1512,28 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Что сделать с записью?",
             reply_markup=kb([
                 [("✏️ Изменить сумму", f"msum:{lid}")],
+                [("🎨 Цвет имени", f"mcolor:{lid}")],
                 [("🔁 Перенести", f"mres:{lid}")],
                 [("🗑 Удалить", f"mdel:{lid}")],
                 [("⬅️ Назад", "mine:edit")],
             ]))
+        return
+
+    if data.startswith("mcolor:"):
+        await q.answer()
+        lid = data.split(":", 1)[1]
+        p = {"шаг": "цвет_имени", "edit_id": lid,
+             "репетитор": name_by_id(user.id) or ""}
+        set_pending(user.id, p)
+        await q.edit_message_text(
+            "🎨 <b>Цвет имени ученика</b>\n\n"
+            "Напишите цвет названием или HEX-кодом:\n"
+            "• <code>красный</code>, <code>синий</code>, <code>зелёный</code>\n"
+            "• <code>#FF0000</code> или <code>FF0000</code>\n\n"
+            "Доступные названия: белый, чёрный, красный, зелёный, синий, "
+            "голубой, жёлтый, оранжевый, фиолетовый, розовый, серый.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb([[("Отменить", "mine:edit")]]))
         return
 
     if data.startswith("msum:"):
@@ -3301,6 +3356,28 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     reply_markup=kb([[("⬅️ Текущие 2 недели", "mine")]]))
         return
 
+    # --- цвет имени ученика в записи
+    if step == "цвет_имени":
+        lid = str(p.get("edit_id", ""))
+        if checks_writer.parse_color(text) is None:
+            await _send(update,
+                        "Не понял цвет. Напишите название (красный, синий…) "
+                        "или HEX-код вида #FF0000.")
+            return
+        try:
+            ok = checks_writer.set_name_color(lid, text)
+        except Exception as e:  # noqa: BLE001
+            log(f"Ошибка смены цвета имени: {e}")
+            ok = False
+        set_pending(user.id, None)
+        if ok:
+            await _send(update, "🎨 Цвет имени изменён.",
+                        reply_markup=kb([[("🏠 Домой", "menu")]]))
+        else:
+            await _send(update, "⚠️ Не удалось изменить цвет: запись не найдена.",
+                        reply_markup=kb([[("🏠 Домой", "menu")]]))
+        return
+
     # --- правка суммы записи
     if step == "минумма":
         amt = parse_amount(text)
@@ -4098,7 +4175,8 @@ async def notify_update(context_or_app) -> None:
     if bullets:
         brief += "\n\n" + "\n".join(
             b if len(b) <= 90 else b[:87] + "..." for b in bullets[:5])
-    markup = kb([[("Отлично", "dismiss")]])
+    # только «Отлично»: «Домой» здесь дублирует её по смыслу
+    markup = kb([[("Отлично", "dismiss")]], home=False)
 
     targets: list[int] = []
     for oid in cfg.get("owner_ids", []):
