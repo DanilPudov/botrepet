@@ -1537,28 +1537,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Что сделать с записью?",
             reply_markup=kb([
                 [("✏️ Изменить сумму", f"msum:{lid}")],
-                [("🎨 Цвет ученика", f"mcolor:{lid}")],
                 [("🔁 Перенести", f"mres:{lid}")],
                 [("🗑 Удалить", f"mdel:{lid}")],
                 [("⬅️ Назад", "mine:edit")],
             ]))
-        return
-
-    if data.startswith("mcolor:"):
-        await q.answer()
-        lid = data.split(":", 1)[1]
-        p = {"шаг": "цвет_имени", "edit_id": lid,
-             "репетитор": name_by_id(user.id) or ""}
-        set_pending(user.id, p)
-        await q.edit_message_text(
-            "🎨 <b>Цвет имени ученика</b> (в этой записи)\n\n"
-            "Напишите цвет названием или HEX-кодом:\n"
-            "• <code>красный</code>, <code>синий</code>, <code>зелёный</code>\n"
-            "• <code>#FF0000</code> или <code>FF0000</code>\n\n"
-            "Доступные названия: белый, чёрный, красный, зелёный, синий, "
-            "голубой, жёлтый, оранжевый, фиолетовый, розовый, серый.",
-            parse_mode=ParseMode.HTML,
-            reply_markup=kb([[("Отменить", "mine:edit")]]))
         return
 
     if data.startswith("msum:"):
@@ -2581,22 +2563,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         "Если это дубль — удалите лишнее в «Текущих 2 неделях».")
         except Exception:  # noqa: BLE001
             pass
-        # ID только что записанного занятия — для смены цвета имени
-        new_id = ""
-        try:
-            rowvals = checks_writer.get_row_lids(row)
-            new_id = rowvals
-        except Exception:  # noqa: BLE001
-            new_id = ""
-        color_btn = ([[("🎨 Цвет ученика", f"mcolor:{new_id}")]]
-                     if new_id else [])
         await q.edit_message_text(
             f"✅ Записано в таблицу, строка {row} ({where}).\n\n"
             f"{p['репетитор']} — {p['ученик']} — {p['сумма']} ₽ ({p['дата']}{tm})"
             + note,
-            reply_markup=kb(color_btn
-                            + [[("Записать ещё", "new")],
-                               [("Меню", "menu")]]))
+            reply_markup=kb([[("Записать ещё", "new")],
+                             [("Меню", "menu")]]))
         return
 
     if data == "redo":
@@ -3410,28 +3382,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await _send(update,
                         "Не понял цвет. Напишите название (красный, синий…) "
                         "или HEX-код вида #FF0000.",
-                        reply_markup=kb([[("🏠 Домой", "menu")]]))
-        return
-
-    # --- цвет имени ученика в записи
-    if step == "цвет_имени":
-        lid = str(p.get("edit_id", ""))
-        if checks_writer.parse_color(text) is None:
-            await _send(update,
-                        "Не понял цвет. Напишите название (красный, синий…) "
-                        "или HEX-код вида #FF0000.")
-            return
-        try:
-            ok = checks_writer.set_name_color(lid, text)
-        except Exception as e:  # noqa: BLE001
-            log(f"Ошибка смены цвета имени: {e}")
-            ok = False
-        set_pending(user.id, None)
-        if ok:
-            await _send(update, "🎨 Цвет имени изменён.",
-                        reply_markup=kb([[("🏠 Домой", "menu")]]))
-        else:
-            await _send(update, "⚠️ Не удалось изменить цвет: запись не найдена.",
                         reply_markup=kb([[("🏠 Домой", "menu")]]))
         return
 
