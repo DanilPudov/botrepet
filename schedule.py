@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import datetime as dt
 
+import workspaces
 import sheets_util
 from sheets_util import load_config, log, norm_name
 
@@ -28,7 +29,7 @@ FULL_DAY_NAMES = ["понедельник", "вторник", "среда", "ч�
 def ensure_sheet() -> str:
     from sheets_util import sheets
     cfg = load_config()
-    sh_id = cfg["sheets"]["history"]
+    sh_id = workspaces.spreadsheet()
     meta = sheets().spreadsheets().get(spreadsheetId=sh_id).execute()
     titles = [s["properties"]["title"] for s in meta.get("sheets", [])]
     if SHEET in titles:
@@ -43,7 +44,7 @@ def ensure_sheet() -> str:
 
 def _rows() -> list[list[str]]:
     cfg = load_config()
-    return sheets_util.get_values(cfg["sheets"]["history"], f"'{SHEET}'!A1:I")
+    return sheets_util.get_values(workspaces.spreadsheet(), f"'{SHEET}'!A1:I")
 
 
 def _next_id() -> int:
@@ -65,7 +66,7 @@ CANCEL_COLS = ["ID", "Репетитор", "Ученик", "Дата", "Врем
 def ensure_cancel_sheet() -> str:
     from sheets_util import sheets
     cfg = load_config()
-    sh_id = cfg["sheets"]["history"]
+    sh_id = workspaces.spreadsheet()
     meta = sheets().spreadsheets().get(spreadsheetId=sh_id).execute()
     titles = [m["properties"]["title"] for m in meta.get("sheets", [])]
     if CANCEL_SHEET in titles:
@@ -80,7 +81,7 @@ def ensure_cancel_sheet() -> str:
 
 def _cancel_rows() -> list[list[str]]:
     cfg = load_config()
-    return sheets_util.get_values(cfg["sheets"]["history"], f"'{CANCEL_SHEET}'!A1:E")
+    return sheets_util.get_values(workspaces.spreadsheet(), f"'{CANCEL_SHEET}'!A1:E")
 
 
 def cancels_for(tutor: str) -> list[dict]:
@@ -106,7 +107,7 @@ def cancels_for(tutor: str) -> list[dict]:
 def add_cancel(tutor: str, student: str, day: dt.date, time_str: str) -> int:
     ensure_cancel_sheet()
     cfg = load_config()
-    sh_id = cfg["sheets"]["history"]
+    sh_id = workspaces.spreadsheet()
     rows = _cancel_rows()
     last = 1
     max_id = 0
@@ -155,7 +156,7 @@ def parse_time_slot(value) -> int | None:
 def remove_cancel(tutor: str, day: dt.date, time_str: str) -> bool:
     """Снять отмену занятия (вернуть в расписание на эту дату)."""
     cfg = load_config()
-    sh_id = cfg["sheets"]["history"]
+    sh_id = workspaces.spreadsheet()
     for c in cancels_for(tutor):
         if c["дата"] == day and parse_time_slot(c["время"]) == parse_time_slot(time_str):
             try:
@@ -198,7 +199,7 @@ def get_entry(entry_id: int) -> dict | None:
 def update_entry(entry_id: int, day: str, time_str: str) -> bool:
     """Меняет день и время записи по ID."""
     cfg = load_config()
-    sh_id = cfg["sheets"]["history"]
+    sh_id = workspaces.spreadsheet()
     for n, row in enumerate(_rows(), start=1):
         if n == 1 or not row:
             continue
@@ -263,7 +264,7 @@ def add_entry(tutor: str, student: str, parent: str, days: str, time_str: str,
     """Добавляет запись расписания. Возвращает ID."""
     ensure_sheet()
     cfg = load_config()
-    sh_id = cfg["sheets"]["history"]
+    sh_id = workspaces.spreadsheet()
     rows = _rows()
     last = 1
     for n, row in enumerate(rows, start=1):
@@ -280,7 +281,7 @@ def add_entry(tutor: str, student: str, parent: str, days: str, time_str: str,
 
 def update_last_date(entry_id: int, day: dt.date) -> None:
     cfg = load_config()
-    sh_id = cfg["sheets"]["history"]
+    sh_id = workspaces.spreadsheet()
     for n, row in enumerate(_rows(), start=1):
         if n == 1 or not row:
             continue
@@ -292,7 +293,7 @@ def update_last_date(entry_id: int, day: dt.date) -> None:
 
 def delete_entry(entry_id: int) -> bool:
     cfg = load_config()
-    sh_id = cfg["sheets"]["history"]
+    sh_id = workspaces.spreadsheet()
     for n, row in enumerate(_rows(), start=1):
         if n == 1 or not row:
             continue
