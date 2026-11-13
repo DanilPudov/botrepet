@@ -60,7 +60,7 @@ def sheet_for_tutor(tutor: str) -> str:
 import time as _time
 
 _READ_CACHE: dict = {}
-_READ_TTL = 25.0  # секунд
+_READ_TTL = 60.0  # секунд
 
 
 def _cache_get(key):
@@ -1034,11 +1034,9 @@ def read_lessons(include_history: bool = False,
             x["лист"] = t
             lessons.append(x)
 
-    # «Чеки» — основной лист занятий репетиторов, читаем всегда
-    try:
-        ensure_checks_ids()
-    except Exception as e:  # noqa: BLE001
-        log(f"ID в «Чеках» не проставлены: {e}")
+    # «Чеки» — основной лист занятий репетиторов, читаем всегда.
+    # ID досоздаются один раз на старте (ensure_checks_ids в прогреве),
+    # а не при каждом чтении: это экономит ~5 секунд.
     try:
         for x in _rows_from(cfg["sheets"]["recept"],
                             cfg["sheets"]["recept_checks_sheet"]):
