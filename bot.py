@@ -53,6 +53,7 @@ from telegram.ext import (
 )
 
 import checks_writer
+import workspaces as _ws
 import sheets_util
 import students as students_module
 import reviews as reviews_module
@@ -62,6 +63,7 @@ import notes as notes_module
 import faq as faq_module
 import links as links_module
 import schedule as schedule_module
+import activity as activity_module
 from sheets_util import (
     load_config,
     names_match,
@@ -168,6 +170,7 @@ def view_as_name(user_id: int) -> str | None:
 def name_by_id(user_id: int) -> str | None:
     va = view_as_name(user_id)
     if va:
+        _ws.set_active(va)
         return va
     for t in load_state().get("tutors", []):
         if int(t["id"]) == user_id:
@@ -487,6 +490,15 @@ def _already_recorded(tutor: str, date_s: str, time_s: str,
     except Exception:  # noqa: BLE001
         return False
     return False
+
+
+def log_action(user_id: int, action: str, details: str = "") -> None:
+    """Записать действие в журнал (кто, что, когда)."""
+    try:
+        who = display_name(user_id) or name_by_id(user_id) or str(user_id)
+        activity_module.record(who, action, details)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _where(p: dict) -> dict:
@@ -866,10 +878,10 @@ async def schedule_view(user_id: int, days: int) -> tuple[str, list[list[tuple[s
                 [("⬅️ Назад", "nav:back")]]
         body = "\n".join(parts)
         count = sum(1 for l in parts if l.startswith("  ") and "(отменено)" not in l)
-        payout = int(total * 0.8)
+        payout = _ws.payout(total, tutor)
         head = (f"📅 *Расписание на месяц вперёд*\n"
                 f"Всего занятий: *{count}* · ожидаемая сумма: *{payout} ₽* "
-                f"(без учёта комиссии)\n\n")
+                f"({_ws.payout_note(tutor)})\n\n")
         text = head + body
         return text, rows
     del_buttons = []
@@ -972,7 +984,7 @@ async def schedule_view(user_id: int, days: int) -> tuple[str, list[list[tuple[s
                 week_sum += int(str(e.get("цена") or 0))
             except ValueError:
                 pass
-    week_payout = int(week_sum * 0.8)
+    week_payout = _ws.payout(week_sum, tutor)
     if days <= 1:
         text = (title + f"\n*Сейчас {parity} неделя* ({iso_week}-я)\n"
                 + "\n"
@@ -1104,14 +1116,21 @@ async def _cleanup_tracked(update: Update, context: ContextTypes.DEFAULT_TYPE,
     save_state(st)
 
 
-async def _cleanup_extras(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Удалить «лишние» сообщения бота (например, вторая часть месяца)."""
+async def _cleanup_extras(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                          keep_id: int | None = None) -> None:
+    """Удалить «лишние» сообщения бота (например, вторая часть месяца).
+
+    keep_id — сообщение, на кнопке которого сейчас нажали: его НЕ удаляем,
+    иначе бот не сможет его отредактировать и экран «пропадёт».
+    """
     user = update.effective_user
     st = load_state()
     extras = (st.get("extra_msgs") or {}).pop(str(user.id), [])
     if extras:
         save_state(st)
     for item in extras:
+        if keep_id is not None and item.get("id") == keep_id:
+            continue
         try:
             await context.bot.delete_message(chat_id=item["chat"],
                                              message_id=item["id"])
@@ -1202,14 +1221,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     _nav_push(user.id, data)
     if data not in ("noop",):
+        keep = getattr(q.message, "message_id", None)
         try:
-            await _cleanup_extras(update, context)
+            await _cleanup_extras(update, context, keep_id=keep)
         except Exception:  # noqa: BLE001
             pass
         try:
-            keep = None
-            if q.message is not None:
-                keep = q.message.message_id
             await _cleanup_tracked(update, context, keep_id=keep)
         except Exception:  # noqa: BLE001
             pass
@@ -1371,6 +1388,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 })
                 schedule_module.update_last_date(entry["id"],
                                                  dt.datetime.strptime(date_s, "%d.%m.%Y").date())
+                log_action(user.id, "подтвердил оплату",
+                           f"{entry.get('репетитор','')} — {entry.get('ученик','')} "
+                           f"{entry.get('цена','')} ₽ ({date_s})")
                 await q.edit_message_text(
                     f"✅ Оплата подтверждена, запись добавлена ({date_s}).")
                 try:
@@ -1432,6 +1452,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data.startswith("view:"):
         await q.answer()
+        _view_target = data.split(":", 1)[1]
+        log_action(user.id, "переключился на репетитора", _view_target)
         arg = data.split(":", 1)[1]
         st = load_state()
         if arg == "me":
@@ -1650,6 +1672,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                       reply_markup=kb([[("⬅️ Назад", "mine:edit")]]))
             return
         if ok:
+            log_action(user.id, "удалил запись", f"id {lid}")
             await q.edit_message_text("🗑 Запись удалена.",
                                       reply_markup=kb([[("🏠 На главный экран", "menu")]]))
         else:
@@ -1687,8 +1710,29 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• /access `anyone|list|invite_code` — режим\n"
             "• /report `<id>` — сводка (или без id — по всем)\n"
         )
-        await q.edit_message_text(text, parse_mode=ParseMode.MARKDOWN,
-                                  reply_markup=kb([[("⬅️ Назад", "nav:back")]]))
+        await q.edit_message_text(
+            text, parse_mode=ParseMode.MARKDOWN,
+            reply_markup=kb([[("📜 Посмотреть логи", "logs")],
+                             [("⬅️ Назад", "nav:back")]]))
+        return
+
+    # --- журнал действий (только организатор)
+    if data == "logs" or data.startswith("logs:"):
+        await q.answer()
+        if role_of(user.id) != OWNER:
+            await q.edit_message_text("Раздел только для организатора.",
+                                      reply_markup=kb([[("⬅️ Назад", "nav:back")]]))
+            return
+        parts = data.split(":")
+        day_offset = 0
+        page = 0
+        if len(parts) >= 3:
+            try:
+                day_offset = max(0, int(parts[1]))
+                page = max(0, int(parts[2]))
+            except ValueError:
+                day_offset, page = 0, 0
+        await show_logs(update, context, day_offset, page)
         return
 
     # --- разделы меню: доступны и без начатого черновика ---
@@ -2159,6 +2203,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if p.get("ученик"):
             students_module.delete_student(p.get("репетитор") or name_by_id(user.id) or "",
                                            p["ученик"])
+            log_action(user.id, "удалил ученика",
+                       f"{p.get('ученик','')} "
+                       f"({p.get('репетитор') or name_by_id(user.id) or ''})")
         set_pending(user.id, None)
         await show_main(update, context, edit=True)
         await _send(update, "🗑 Ученик удалён.",
@@ -2609,6 +2656,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "ученик": p.get("ученик"), "сумма": p.get("сумма")}
         save_state(st)
         set_pending(user.id, None)
+        log_action(user.id, "записал занятие",
+                   f"{p.get('репетитор','')} — {p.get('ученик','')} "
+                   f"{p.get('сумма','')} ₽ ({p.get('дата','')} "
+                   f"{p.get('время','') or 'без времени'})")
         await notify_owner(context, p, row)
         tm = f" {p['время']}" if p.get("время") else ", без времени"
         where = checks_writer.target_name()
@@ -3470,6 +3521,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                        "первое": x["первое"], "как_прошло": x["как_прошло"],
                        "будут": x["будут"], "комиссия": x["комиссия"]}
                 checks_writer.update_lesson(lid, rec)
+                log_action(user.id, "изменил сумму",
+                           f"{x['репетитор']} — {x['ученик']} "
+                           f"→ {amt} ₽")
                 break
         set_pending(user.id, None)
         await _send(update, "✅ Запись изменена.",
@@ -3543,6 +3597,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # --- комментарий ученика
     if step == "правка_comment":
+        _tut_c = p.get("репетитор") or name_by_id(user.id) or ""
+        _stu_c = p.get("ученик") or ""
+        log_action(user.id, "изменил комментарий",
+                   f"{_tut_c} — {_stu_c}")
         tutor = p.get("репетитор") or name_by_id(user.id) or ""
         students_module.update_student(tutor, p.get("ученик", ""),
                                        comment=text[:300], **_where(p))
@@ -3553,6 +3611,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # --- правка ссылок
     if step in ("правка_link_student", "правка_link_parent"):
+        _tut_l = p.get("репетитор") or name_by_id(user.id) or ""
+        _stu_l = p.get("ученик") or ""
+        log_action(user.id, "изменил ссылку родителя" if
+                   step == "правка_link_parent" else "изменил ссылку ученика",
+                   f"{_tut_l} — {_stu_l}")
         tutor = p.get("репетитор") or name_by_id(user.id) or ""
         student = p.get("ученик") or ""
         link = text.strip()
@@ -3615,10 +3678,14 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             students_module.update_student(tutor, student, rate=str(amt),
                                            **_where(p))
+            log_action(user.id, "изменил цену ученика",
+                       f"{tutor} — {student} → {amt} ₽")
         elif step == "правка_parent":
             students_module.update_student(tutor, student,
                                            parent=norm_name(text)[:60],
                                            **_where(p))
+            log_action(user.id, "изменил родителя",
+                       f"{tutor} — {student} → {norm_name(text)[:60]}")
         else:
             new_name = norm_name(text)[:60]
             if len(new_name) < 2:
@@ -3626,6 +3693,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             students_module.update_student(tutor, student,
                                            new_name=new_name, **_where(p))
+            log_action(user.id, "переименовал ученика",
+                       f"{tutor} — {student} → {new_name}")
         set_pending(user.id, None)
         await _send(update, 
             "✅ Сохранено.", reply_markup=kb([[("⬅️ К ученикам", "students")]]))
@@ -3774,6 +3843,58 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # --------------------------------------------------------------------------- #
 # Отчёты
 # --------------------------------------------------------------------------- #
+LOGS_PER_PAGE = 10
+
+
+async def show_logs(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                    day_offset: int = 0, page: int = 0) -> None:
+    """Журнал действий: кто, что и когда — постранично."""
+    items = activity_module.entries(day_offset)
+    label = activity_module.day_label(day_offset)
+    if not items:
+        text = (f"📜 <b>Журнал действий</b>\n{label}\n\n"
+                "Записей нет.")
+        rows = [[("📅 Вчера", f"logs:{day_offset + 1}:0")] if day_offset == 0
+                else [("📅 Сегодня", "logs:0:0")],
+                [("⬅️ Назад", "admin")]]
+        await _say(update, text, parse_mode=ParseMode.HTML, reply_markup=kb(rows))
+        return
+
+    pages = (len(items) + LOGS_PER_PAGE - 1) // LOGS_PER_PAGE
+    page = min(max(0, page), pages - 1)
+    chunk = items[page * LOGS_PER_PAGE:(page + 1) * LOGS_PER_PAGE]
+
+    lines = []
+    for e in chunk:
+        ts = str(e.get("ts", ""))[11:16]          # ЧЧ:ММ
+        who = str(e.get("user", "")).strip()
+        act = str(e.get("action", "")).strip()
+        det = str(e.get("details", "")).strip()
+        line = f"<b>{ts}</b> {html.escape(who)} — {html.escape(act)}"
+        if det:
+            line += f": {html.escape(det)}"
+        lines.append(line)
+
+    text = (f"📜 <b>Журнал действий</b> — {label}\n"
+            f"Всего записей: {len(items)} · стр. {page + 1}/{pages}\n\n"
+            + "\n".join(lines))
+
+    nav: list[list[tuple[str, str]]] = []
+    prev_btn = ("◀️ Раньше", f"logs:{day_offset}:{page - 1}")
+    next_btn = ("Позже ▶️", f"logs:{day_offset}:{page + 1}")
+    if pages > 1:
+        if page > 0:
+            nav.append([prev_btn, next_btn] if page < pages - 1 else [prev_btn])
+        else:
+            nav.append([next_btn])
+    day_row = ([("📅 Вчера", f"logs:{day_offset + 1}:0")] if day_offset == 0
+               else [("📅 Сегодня", "logs:0:0"),
+                     ("📅 Раньше", f"logs:{day_offset + 1}:0")])
+    nav.append(day_row)
+    nav.append([("⬅️ Назад", "admin")])
+    await _say(update, text, parse_mode=ParseMode.HTML, reply_markup=kb(nav))
+
+
 async def show_students_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Раздел «Мои ученики» — кнопки по ученикам."""
     user = update.effective_user
@@ -3853,13 +3974,13 @@ async def show_mine_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     total = sum(x["сумма"] for x in lessons)
     head = (f"<b>Текущие 2 недели</b> "
             f"({week_start:%d.%m}–{week_end:%d.%m})\n\n")
-    payout = int(total * 0.8)
+    payout = _ws.payout(total, tutor)
     _tp = sum(1 for x in lessons if flags.get(str(x.get("id") or ""), "") == "paid")
     _tn = sum(1 for x in lessons if flags.get(str(x.get("id") or ""), "") == "no")
     _tu = len(lessons) - _tp - _tn
     text = (head + "\n".join(parts)
             + f"\n\n✅ оплачено: {_tp} · ❌ отклонено: {_tn} · ⚪️ не проверено: {_tu}"
-            + f"\n<b>Итого — {payout} ₽</b> (к выплате, 80%, "
+            + f"\n<b>Итого — {payout} ₽</b> ({_ws.payout_note(tutor)}, "
               "без учёта комиссии за ученика)") if parts else (
         f"<b>Текущие 2 недели</b> ({week_start:%d.%m}–{week_end:%d.%m})\n\n"
         "Записей пока нет.")
@@ -3922,12 +4043,12 @@ async def show_past_week(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 "Занятий нет.")
     else:
         _total = paid_sum + no_sum + _unknown_sum
-        _payout = int(_total * 0.8)
+        _payout = _ws.payout(_total, p.get("репетитор") or "")
         text = (f"📆 <b>Предыдущие 2 недели</b> ({monday:%d.%m}–{sunday:%d.%m})\n\n"
                 + "\n".join(parts)
                 + f"\n\n✅ подтверждено: <b>{paid_sum} ₽</b>"
                 + f"\n❌ не подтверждено: <b>{no_sum} ₽</b>"
-                + f"\n\n<b>Итого — {_payout} ₽</b> (к выплате, 80%)")
+                + f"\n\n<b>Итого — {_payout} ₽</b> ({_ws.payout_note(p.get('репетитор') or '')})")
     rows.append([("⬅️ Назад", "nav:back")])
     await _say(update, text, parse_mode=ParseMode.HTML, reply_markup=kb(rows))
 
@@ -3989,7 +4110,8 @@ async def mine_report(user_id: int) -> str:
     return (f"*Текущие 2 недели* ({start:%d.%m}–{end:%d.%m}) "
             f"— {display_name(user_id) or tutor}\n\n"
             + "\n".join(lines)
-            + f"\n\nК выплате: *{int(total * 0.8)} ₽* (без учёта комиссии)")
+            + f"\n\nК выплате: *{_ws.payout(total, tutor)} ₽* "
+              f"({_ws.payout_note(tutor)}, без учёта комиссии)")
 
 
 async def notify_owner(context: ContextTypes.DEFAULT_TYPE, p: dict, row: int):
@@ -4010,6 +4132,9 @@ async def notify_owner(context: ContextTypes.DEFAULT_TYPE, p: dict, row: int):
 # Админ-команды
 # --------------------------------------------------------------------------- #
 async def add_tutor(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if context.args:
+        log_action(update.effective_user.id, "выдал доступ",
+                   " ".join(context.args))
     if role_of(update.effective_user.id) != OWNER:
         await update.message.reply_text("Только для организатора.")
         return
@@ -4044,6 +4169,9 @@ async def list_tutors(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def remove_tutor(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if context.args:
+        log_action(update.effective_user.id, "забрал доступ",
+                   " ".join(context.args))
     if role_of(update.effective_user.id) != OWNER:
         await update.message.reply_text("Только для организатора.")
         return
