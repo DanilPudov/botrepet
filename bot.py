@@ -167,6 +167,15 @@ def view_as_name(user_id: int) -> str | None:
     return (load_state().get("view_as") or {}).get(str(user_id))
 
 
+def _full_name(user_id: int) -> str | None:
+    """Имя и фамилия для журнала: как записан в настройках."""
+    for t in load_state().get("tutors", []):
+        if int(t["id"]) == user_id:
+            name = (t.get("name") or "").strip()
+            return name or None
+    return None
+
+
 def name_by_id(user_id: int) -> str | None:
     va = view_as_name(user_id)
     if va:
@@ -319,15 +328,34 @@ def has_call_name(user_id: int) -> bool:
     return True
 
 
+def _view_allowed(user_id: int) -> list[str] | None:
+    """Каких репетиторов может смотреть этот аккаунт (None — всех)."""
+    st = load_state()
+    for t in st.get("tutors", []):
+        try:
+            if int(t["id"]) != int(user_id):
+                continue
+        except (KeyError, ValueError, TypeError):
+            continue
+        allowed = t.get("can_view")
+        if allowed:
+            return [norm_name(x) for x in allowed]
+    return None
+
+
 async def show_owner_picker(update: Update, context: ContextTypes.DEFAULT_TYPE,
                             edit: bool = True) -> None:
     """Организатор выбирает, за какого репетитора зайти."""
     user = update.effective_user
     names: list[str] = []
+    only = _view_allowed(user.id)
     for t in load_state().get("tutors", []):
         nm = (t.get("name") or "").strip()
-        if nm and nm not in names:      # у Ильхама два ID — показываем один раз
-            names.append(nm)
+        if not nm or nm in names:      # у Ильхама два ID — показываем один раз
+            continue
+        if only is not None and norm_name(nm) not in only:
+            continue
+        names.append(nm)
     rows = [[(n, f"view:{i}")] for i, n in enumerate(names)]
     rows.append([("👤 Мой профиль", "view:me")])
     text = ("👋 Вы организатор.\n\n"
@@ -505,8 +533,16 @@ def _already_recorded(tutor: str, date_s: str, time_s: str,
 def log_action(user_id: int, action: str, details: str = "") -> None:
     """Записать действие в журнал (кто, что, когда)."""
     try:
-        who = display_name(user_id) or name_by_id(user_id) or str(user_id)
+        who = _full_name(user_id) or name_by_id(user_id) or str(user_id)
         activity_module.record(who, action, details)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def log_system(action: str, details: str = "") -> None:
+    """Записать автоматическое действие бота (от имени DSH)."""
+    try:
+        activity_module.record_system(action, details)
     except Exception:  # noqa: BLE001
         pass
 
@@ -1401,6 +1437,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 })
                 schedule_module.update_last_date(entry["id"],
                                                  dt.datetime.strptime(date_s, "%d.%m.%Y").date())
+                log_system("записал занятие по расписанию",
+                           f"{entry.get('репетитор','')} — "
+                           f"{entry.get('ученик','')} ({date_s})")
                 log_action(user.id, "подтвердил оплату",
                            f"{entry.get('репетитор','')} — {entry.get('ученик','')} "
                            f"{entry.get('цена','')} ₽ ({date_s})")
@@ -1474,7 +1513,15 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             save_state(st)
             await show_main(update, context, edit=True)
             return
-        names = [t.get("name", "") for t in st.get("tutors", []) if t.get("name")]
+        only = _view_allowed(user.id)
+        names: list[str] = []
+        for t in st.get("tutors", []):
+            nm = (t.get("name") or "").strip()
+            if not nm or nm in names:
+                continue
+            if only is not None and norm_name(nm) not in only:
+                continue
+            names.append(nm)
         idx = int(arg) if arg.isdigit() else -1
         if 0 <= idx < len(names):
             st.setdefault("view_as", {})[str(user.id)] = names[idx]
@@ -4453,16 +4500,13 @@ async def _maybe_send_note(bot_obj, user_id) -> None:
         if uid in sent:
             return
         cfg = load_config()
+        # уведомления об обновлении — только главному владельцу
         allowed: set[str] = set()
-        for oid in cfg.get("owner_ids", []):
+        for oid in (cfg.get("note_recipients")
+                    or [cfg.get("owner_ids", [793935902])[0]]):
             try:
                 allowed.add(str(int(oid)))
             except (ValueError, TypeError):
-                continue
-        for t in st.get("tutors", []):
-            try:
-                allowed.add(str(int(t["id"])))
-            except (KeyError, ValueError, TypeError):
                 continue
         if uid not in allowed:
             return
