@@ -228,28 +228,41 @@ def kb_cancel() -> InlineKeyboardMarkup:
 MAIN_TEXT = "Выберите действие:"
 
 
+def _week_btn(user_id: int) -> str:
+    """«Текущая неделя» для семьи, «Текущие 2 недели» для остальных."""
+    tutor = name_by_id(user_id) or ""
+    return "📊 Текущая неделя" if _ws.is_family(tutor) else "📊 Текущие 2 недели"
+
+
 def kb_main(user_id: int) -> InlineKeyboardMarkup:
     return kb(home=False, rows=[
         [("📝 Записать занятие", "new")],
-        [("📊 Текущие 2 недели", "mine"), ("📅 Расписание", "sched:today")],
+        [(_week_btn(user_id), "mine"), ("📅 Расписание", "sched:today")],
         [("📝 Заметки", "notes")],
         [("☰ Меню", "more")],
     ])
+
+
+def _past_btn(user_id: int) -> str:
+    tutor = name_by_id(user_id) or ""
+    return "📆 Прошлая неделя" if _ws.is_family(tutor) else "📆 Предыдущие 2 недели"
 
 
 def kb_more(user_id: int) -> InlineKeyboardMarkup:
     rows = [
         [("👥 Мои ученики", "students")],
         [("⭐ Отзывы", "reviews"), ("🎁 Рефералы", "referrals")],
-        [("📆 Предыдущие 2 недели", "pastweek")],
+        [(_past_btn(user_id), "pastweek")],
         [("💡 Предложить улучшение", "suggest")],
         [("✏️ Изменить имя", "rename"), ("❓ FAQ", "faq")],
         [("🎨 Цвет моего имени", "tcolor")],
     ]
     if role_of(user_id) == OWNER:
-        if view_as_name(user_id):
+        if not view_as_name(user_id):
+            rows.append([("📜 Последние логи", "logs")])
+            rows.append([("⚙️ Управление", "admin")])
+        else:
             rows.append([("🔄 Сменить репетитора", "view_mode")])
-        rows.append([("⚙️ Управление", "admin")])
     rows.append([("⬅️ Назад", "nav:back")])
     return kb(rows)
 
@@ -1231,6 +1244,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:  # noqa: BLE001
             pass
     role = role_of(user.id)
+    try:
+        await _maybe_send_note(context.bot, user.id)
+    except Exception:  # noqa: BLE001
+        pass
     pending = get_pending(user.id)
     manual = bool(pending.get("чужой")) if pending else False
     if role is None and not manual and data not in ("manual:start", "manual:again"):
@@ -3481,7 +3498,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"🔁 Перенесено на {d:%d.%m.%Y} {t}.\n"
                     f"Занятие в расписании помечено как перенесённое "
                     f"(#{eid}) и после этой даты исчезнет.",
-                    reply_markup=kb([[("⬅️ Текущие 2 недели", "mine")]]))
+                    reply_markup=kb([[("⬅️ " + _week_btn(user.id), "mine")]]))
         return
 
     # --- цвет имени репетитора (для всех его занятий)
@@ -3527,7 +3544,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 break
         set_pending(user.id, None)
         await _send(update, "✅ Запись изменена.",
-                    reply_markup=kb([[("⬅️ Текущая неделя", "mine")]]))
+                    reply_markup=kb([[("⬅️ " + _week_btn(user.id), "mine")]]))
         return
 
     # --- новый ученик: цена
@@ -3999,12 +4016,14 @@ WEEKDAYS_RU = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
 
 
 async def show_past_week(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Предыдущие 2 недели: ✅ подтверждённые, ❌ нет (по цвету суммы)."""
+    """Предыдущая неделя/2 недели: ✅ подтверждённые, ❌ нет (по цвету суммы)."""
     user = update.effective_user
     tutor = name_by_id(user.id) or ""
+    _span = _ws.week_span(tutor)
+    _title = "Прошлая неделя" if _span == 7 else "Предыдущие 2 недели"
     today = dt.date.today()
-    monday = today - dt.timedelta(days=today.weekday() + 14)
-    sunday = monday + dt.timedelta(days=13)
+    monday = today - dt.timedelta(days=today.weekday() + _span)
+    sunday = monday + dt.timedelta(days=_span - 1)
     try:
         all_lessons = checks_writer.read_lessons(include_history=True)
     except Exception:  # noqa: BLE001
@@ -4043,12 +4062,12 @@ async def show_past_week(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         else:
             _unknown_sum += x["сумма"]
     if not parts:
-        text = (f"📆 <b>Предыдущие 2 недели</b> ({monday:%d.%m}–{sunday:%d.%m})\n\n"
+        text = (f"📆 <b>{_title}</b> ({monday:%d.%m}–{sunday:%d.%m})\n\n"
                 "Занятий нет.")
     else:
         _total = paid_sum + no_sum + _unknown_sum
         _payout = _ws.payout(_total, p.get("репетитор") or "")
-        text = (f"📆 <b>Предыдущие 2 недели</b> ({monday:%d.%m}–{sunday:%d.%m})\n\n"
+        text = (f"📆 <b>{_title}</b> ({monday:%d.%m}–{sunday:%d.%m})\n\n"
                 + "\n".join(parts)
                 + f"\n\n✅ подтверждено: <b>{paid_sum} ₽</b>"
                 + f"\n❌ не подтверждено: <b>{no_sum} ₽</b>"
@@ -4479,7 +4498,7 @@ async def post_init(app: Application):
     await app.bot.set_my_commands([
         BotCommand("start", "Главное меню"),
         BotCommand("new", "Записать занятие"),
-        BotCommand("mine", "Текущие 2 недели"),
+        BotCommand("mine", "Текущие занятия"),
         BotCommand("faq", "FAQ"),
         BotCommand("help", "FAQ"),
     ])
