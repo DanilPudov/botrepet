@@ -177,7 +177,7 @@ def _retry_429(func, *args, **kwargs):
 # Кэш прочитанных диапазонов: один экран бота делает 5-9 одинаковых
 # чтений одних и тех же листов. TTL короткий, при записи кэш сбрасывается.
 _VALUES_CACHE: dict = {}
-_VALUES_TTL = 20.0
+_VALUES_TTL = 60.0
 
 
 def invalidate_values_cache() -> None:
