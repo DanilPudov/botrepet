@@ -4478,6 +4478,16 @@ async def notify_update(context_or_app) -> None:
     if not brief:
         return
     st = load_state()
+    # не повторять то же самое: если текст не изменился — не шлём
+    prev = (st.get("last_note_text") or "").strip()
+    if prev == brief.strip():
+        log("Уведомление не изменилось — не отправляю повторно")
+        try:
+            note_path.unlink()
+        except OSError:
+            pass
+        return
+    st["last_note_text"] = brief.strip()
     st["pending_note"] = {"text": brief, "digest": digest, "sent": []}
     save_state(st)
     log("Уведомление об обновлении отложено до действия пользователя")
@@ -4530,6 +4540,65 @@ async def _maybe_send_note(bot_obj, user_id) -> None:
         log(f"Не смог отправить отложенное уведомление: {e}")
 
 
+async def _warm_cache(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Заранее прочитать таблицы в фоне — первый экран открывается сразу."""
+    import asyncio as _aio
+
+    def _load() -> None:
+        try:
+            checks_writer.ensure_checks_ids()
+        except Exception as e:  # noqa: BLE001
+            log(f"ID в «Чеках» не проставлены: {e}")
+        try:
+            checks_writer.read_lessons(include_history=True)
+            checks_writer.lesson_flags()
+            students_module.students_of("Данил Пудов")
+        except Exception as e:  # noqa: BLE001
+            log(f"Прогрев кэша не удался: {e}")
+
+    try:
+        await _aio.to_thread(_load)
+        log("Кэш прогрет")
+    except Exception as e:  # noqa: BLE001
+        log(f"Прогрев кэша не удался: {e}")
+
+
+async def check_suggestions_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Раз в час: проверить таблицу предложений и напомнить о новых."""
+    try:
+        pend = suggestions_module.pending_suggestions()
+    except Exception as e:  # noqa: BLE001
+        log(f"Проверка предложений не удалась: {e}")
+        return
+    if not pend:
+        return
+    cfg = load_config()
+    st = load_state()
+    # уже отправленные строки не повторяем
+    shown = set(str(x) for x in (st.get("suggestions_shown") or []))
+    fresh = [x for x in pend if str(x["row"]) not in shown]
+    if not fresh:
+        return
+    for oid in cfg.get("note_recipients") or cfg.get("owner_ids", []):
+        for x in fresh[:10]:
+            try:
+                await context.bot.send_message(
+                    chat_id=int(oid),
+                    text=(f"💡 <b>Предложение</b> (строка {x['row']})\n"
+                          f"От: {x['репетитор']}\n\n"
+                          f"{str(x['текст'])[:400]}"),
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=kb([
+                        [("✅ Принять", f"sug:ok:{x['row']}")],
+                        [("❌ Отклонить", f"sug:no:{x['row']}")]]))
+            except Exception as e:  # noqa: BLE001
+                log(f"Не смог отправить предложение {oid}: {e}")
+    shown |= {str(x["row"]) for x in fresh}
+    st["suggestions_shown"] = sorted(shown)[-200:]
+    save_state(st)
+    log(f"Проверка предложений: новых {len(fresh)}")
+
+
 async def post_init(app: Application):
     await app.bot.set_my_commands([
         BotCommand("start", "Главное меню"),
@@ -4543,18 +4612,7 @@ async def post_init(app: Application):
     except Exception as e:  # noqa: BLE001
         log(f"Ошибка уведомления об обновлении: {e}")
     try:
-        pend = suggestions_module.pending_suggestions()
-        if pend:
-            lines = "\n".join(f"• {x['репетитор']}: {x['текст'][:80]}"
-                              for x in pend[:10])
-            cfg = load_config()
-            for oid in cfg.get("owner_ids", []):
-                await app.bot.send_message(
-                    chat_id=int(oid),
-                    text=(f"💡 Необработанных предложений: {len(pend)}\n\n"
-                          f"{lines}\n\nПримите решение: «Остальное» → "
-                          "«Предложить улучшение» не нужен — решения приходят "
-                          "сообщением."))
+        await check_suggestions_job(SimpleNamespace(bot=app.bot))
     except Exception as e:  # noqa: BLE001
         log(f"Ошибка отчёта по предложениям: {e}")
 
@@ -4746,6 +4804,8 @@ def main():
         app.job_queue.run_once(reschedule_reminders, when=5)
         app.job_queue.run_repeating(reschedule_reminders, interval=3600, first=60)
         app.job_queue.run_daily(reschedule_reminders, time=dt.time(hour=0, minute=10))
+        app.job_queue.run_repeating(check_suggestions_job, interval=3600, first=90)
+        app.job_queue.run_once(_warm_cache, when=1)
 
     log(f"Бот запущен. Режим доступа: {cfg.get('access')}")
     try:
