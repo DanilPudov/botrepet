@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import datetime as dt
 
+import workspaces
 import sheets_util
 from sheets_util import load_config, log, norm_name
 
@@ -24,7 +25,7 @@ DATE_FMT = "%d.%m.%Y"
 # Вспомогательное
 # --------------------------------------------------------------------------- #
 def _history_id() -> str:
-    return load_config()["sheets"]["history"]
+    return workspaces.spreadsheet()
 
 
 def _header_matches(row: list[str] | None) -> bool:
