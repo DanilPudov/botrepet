@@ -3929,7 +3929,7 @@ async def show_mine_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     tutor = name_by_id(user.id) or ""
     today = dt.date.today()
     week_start = today - dt.timedelta(days=today.weekday())
-    week_end = week_start + dt.timedelta(days=13)
+    week_end = week_start + dt.timedelta(days=_ws.week_span(tutor) - 1)
     try:
         all_lessons = checks_writer.read_lessons(with_checks=True)
     except Exception:  # noqa: BLE001
@@ -3972,17 +3972,21 @@ async def show_mine_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             mark = "✅ " if st == "paid" else ("❌ " if st == "no" else "⚪️ ")
             parts.append(f"  {mark}{tm} {who} — {x['сумма']} ₽")
     total = sum(x["сумма"] for x in lessons)
-    head = (f"<b>Текущие 2 недели</b> "
+    _span = _ws.week_span(tutor)
+    _title = "Текущая неделя" if _span == 7 else "Текущие 2 недели"
+    head = (f"<b>{_title}</b> "
             f"({week_start:%d.%m}–{week_end:%d.%m})\n\n")
     payout = _ws.payout(total, tutor)
     _tp = sum(1 for x in lessons if flags.get(str(x.get("id") or ""), "") == "paid")
     _tn = sum(1 for x in lessons if flags.get(str(x.get("id") or ""), "") == "no")
     _tu = len(lessons) - _tp - _tn
+    _total_line = f"\n<b>Итого — {payout} ₽</b>"
+    if not _ws.is_family(tutor):
+        _total_line += f" ({_ws.payout_note(tutor)}, без учёта комиссии за ученика)"
     text = (head + "\n".join(parts)
             + f"\n\n✅ оплачено: {_tp} · ❌ отклонено: {_tn} · ⚪️ не проверено: {_tu}"
-            + f"\n<b>Итого — {payout} ₽</b> ({_ws.payout_note(tutor)}, "
-              "без учёта комиссии за ученика)") if parts else (
-        f"<b>Текущие 2 недели</b> ({week_start:%d.%m}–{week_end:%d.%m})\n\n"
+            + _total_line) if parts else (
+        f"<b>{_title}</b> ({week_start:%d.%m}–{week_end:%d.%m})\n\n"
         "Записей пока нет.")
     rows = []
     if lessons:
@@ -4059,7 +4063,7 @@ async def show_mine_records(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     tutor = name_by_id(user.id) or ""
     today = dt.date.today()
     week_start = today - dt.timedelta(days=today.weekday())
-    week_end = week_start + dt.timedelta(days=13)
+    week_end = week_start + dt.timedelta(days=_ws.week_span(tutor) - 1)
     lessons = [x for x in checks_writer.read_lessons()
                if x["репетитор"] == tutor
                and week_start <= x["дата"] <= week_end]
@@ -4094,11 +4098,13 @@ async def mine_report(user_id: int) -> str:
         return "Сначала выберите своё имя (/start)."
     _today = dt.date.today()
     start = _today - dt.timedelta(days=_today.weekday())
-    end = start + dt.timedelta(days=13)
+    _span = _ws.week_span(tutor)
+    end = start + dt.timedelta(days=_span - 1)
+    _title = "Текущая неделя" if _span == 7 else "Текущие 2 недели"
     lessons = [x for x in checks_writer.read_lessons()
                if x["репетитор"] == tutor and start <= x["дата"] <= end]
     if not lessons:
-        return (f"Текущие 2 недели ({start:%d.%m}–{end:%d.%m}): "
+        return (f"{_title} ({start:%d.%m}–{end:%d.%m}): "
                 "записей не найдено.")
     lessons.sort(key=lambda x: (x["дата"], _time_key(x["время"])))
     total = sum(x["сумма"] for x in lessons)
@@ -4107,11 +4113,12 @@ async def mine_report(user_id: int) -> str:
         tm = f" {x['время']}" if x["время"] else ""
         comm = f" ({x['комментарий']})" if x["комментарий"] else ""
         lines.append(f"{x['дата']:%d.%m}{tm} — {x['ученик']} — {x['сумма']} ₽{comm}")
-    return (f"*Текущие 2 недели* ({start:%d.%m}–{end:%d.%m}) "
+    _tail = f"\n\nИтого: *{_ws.payout(total, tutor)} ₽*"
+    if not _ws.is_family(tutor):
+        _tail += f" ({_ws.payout_note(tutor)}, без учёта комиссии)"
+    return (f"*{_title}* ({start:%d.%m}–{end:%d.%m}) "
             f"— {display_name(user_id) or tutor}\n\n"
-            + "\n".join(lines)
-            + f"\n\nК выплате: *{_ws.payout(total, tutor)} ₽* "
-              f"({_ws.payout_note(tutor)}, без учёта комиссии)")
+            + "\n".join(lines) + _tail)
 
 
 async def notify_owner(context: ContextTypes.DEFAULT_TYPE, p: dict, row: int):
