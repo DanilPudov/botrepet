@@ -294,12 +294,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         log(f"Запрос доступа: id={user.id} "
             f"имя={user.first_name or ''} @{user.username or ''}")
         await update.message.reply_text(
-            "🔒 Ваш аккаунт не опознан.\n\nTelegram ID: `" + str(user.id) + "`\n\n"
-            "Если у вас нет доступа, можно записать занятие вручную — с пометкой, "
-            "что запись сделана с другого аккаунта.",
+            "🔒 Нет доступа.\n\nОбратитесь к организатору, чтобы вас добавили. "
+            "Сообщите ему свой ID: `" + str(user.id) + "`.",
             parse_mode=ParseMode.MARKDOWN,
-            reply_markup=kb([[("✍️ Ввести имя вручную", "manual:start")]],
-                            home=False),
         )
         return
 
@@ -722,6 +719,8 @@ async def _process_schedule_queue(update, context, p) -> None:
             return
 
         st = students_module.find_student(tutor, student) or {}
+        log_action(user.id, "добавил в расписание",
+                   f"{student} {t or ''}".strip())
         schedule_module.add_entry(tutor, student, parent or st.get("родитель", ""),
                                   schedule_module.DAY_NAMES[weekday], t,
                                   st.get("тариф", ""))
@@ -1248,9 +1247,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _maybe_send_note(context.bot, user.id)
     except Exception:  # noqa: BLE001
         pass
-    pending = get_pending(user.id)
-    manual = bool(pending.get("чужой")) if pending else False
-    if role is None and not manual and data not in ("manual:start", "manual:again"):
+    if role is None:
         await q.answer("Нет доступа", show_alert=True)
         return
 
@@ -1261,8 +1258,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data in ("manual:start", "manual:again"):
-        await q.answer()
-        await manual_start(update, context)
+        await q.answer("Нет доступа", show_alert=True)
         return
 
     if data.startswith("sug:"):
@@ -2093,6 +2089,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                        f"{day:%d.%m} {t} {student}.")
             else:
                 schedule_module.add_cancel(tutor, student, day, t)
+                log_action(user.id, "отменил занятие",
+                           f"{student} {day:%d.%m} {t}")
                 msg = (f"❌ Отменено только на {schedule_module.DAY_NAMES[day.weekday()]} "
                        f"{day:%d.%m} {t} {student}.\n"
                        "На следующей неделе занятие останется как обычно.")
@@ -3156,10 +3154,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _delete_prev(update, context)
     await _delete_user_msg(update, context)
     p = get_pending(user.id)
-    allowed_manual = bool(p) and (p.get("чужой") or p.get("шаг") == "ручное_имя")
-    if role_of(user.id) is None and not allowed_manual:
-        await _send(update, 
-            "Нет доступа. Ваш id: `" + str(user.id) + "` — отправьте его организатору.",
+    if role_of(user.id) is None:
+        await _send(update,
+            "🔒 Нет доступа. Ваш id: `" + str(user.id) + "` — "
+            "отправьте его организатору.",
             parse_mode=ParseMode.MARKDOWN)
         return
 
@@ -3169,21 +3167,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     step = p.get("шаг")
 
-    # --- имя репетитора для записи с чужого аккаунта
-    if step == "ручное_имя":
-        name = norm_name(text)[:80]
-        if len(name) < 3:
-            await _send(update, "Напишите имя и фамилию репетитора.")
-            return
-        state = load_state()
-        state.setdefault("manual_name", {})[str(user.id)] = name
-        save_state(state)
-        await manual_show_students(update, context, name)
-        return
-
     # --- предложение по улучшению бота
     if step == "предложение":
         tutor = p.get("репетитор") or display_name(user.id) or f"ID {user.id}"
+        log_action(user.id, "предложил улучшение", text[:60])
         row = suggestions_module.add_suggestion(tutor, text[:500],
                                                 source=str(user.id))
         set_pending(user.id, None)
@@ -3342,6 +3329,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await _send(update, "Такое имя тоже уже есть. Напишите другое.")
             return
         students_module.add_student(tutor, new_name, p.get("дубль_родитель", ""))
+        log_action(user.id, "добавил ученика",
+                   f"{new_name} ({p.get('дубль_родитель') or 'без родителя'})")
         p.update({"ученик": new_name, "родитель": p.get("дубль_родитель", "")})
         if p.get("режим") == "ученики":
             p.pop("режим", None)
@@ -3602,6 +3591,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tutor_nm = p.get("репетитор") or name_by_id(user.id) or ""
         try:
             notes_module.set_note(tutor_nm, text[:2000])
+            log_action(user.id, "изменил заметку", text[:60])
         except Exception as e:  # noqa: BLE001
             log(f"Не смог сохранить заметку: {e}")
             await _send(update, f"❌ Не удалось сохранить заметку: {e}")
@@ -3723,6 +3713,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         row = reviews_module.add_review(
             p.get("репетитор") or name_by_id(user.id) or "",
             p.get("отзыв_ученик", ""), p["отзыв"])
+        log_action(user.id, "оставил отзыв",
+                   f"{p.get('отзыв_ученик') or 'без ученика'}: {p['отзыв'][:60]}")
         set_pending(user.id, None)
         await _send(update, track=False, text=
             f"⭐ Отзыв сохранён ({reviews_module.REWARD} ₽ начислено).",
