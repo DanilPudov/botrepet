@@ -93,3 +93,8 @@ def day_label(day_offset: int) -> str:
 
 def has_day(day_offset: int) -> bool:
     return bool(entries(day_offset))
+
+
+def record_system(action: str, details: str = "") -> None:
+    """Записать автоматическое действие бота — от имени DSH."""
+    record("DSH", action, details)
