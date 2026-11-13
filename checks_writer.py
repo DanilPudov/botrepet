@@ -91,10 +91,19 @@ def invalidate_cache() -> None:
 def _target(tutor: str = "") -> tuple[str, str]:
     """Куда писать занятие.
 
-    Данил Пудов / Вика — в свой лист «История Данил» / «История Вика».
-    Все остальные репетиторы — в «Чеки Репет» → лист «Чеки».
+    У Максима и Вики — своя отдельная таблица (если доступна).
+    Данил Пудов — «История Данил» в главной таблице.
+    Остальные репетиторы — «Чеки Репет» → лист «Чеки».
     """
     cfg = load_config()
+    # личная таблица репетитора (Максим, Вика)
+    try:
+        import workspaces as _ws
+        sid = _ws.workspace_id(tutor) if tutor else None
+        if sid:
+            return sid, _ws.WORKSPACE_LESSONS_SHEET
+    except Exception as e:  # noqa: BLE001
+        log(f"Не смог определить личную таблицу: {e}")
     sheet = sheet_for_tutor(tutor) if tutor else PERSONAL_SHEETS["Данил Пудов"]
     if sheet in PERSONAL_SHEETS.values():
         return cfg["sheets"]["history"], sheet
@@ -272,18 +281,8 @@ def append_check(record: dict) -> int:
         log(f"Не удалось оформить строку {row_num}: {e}")
 
     log(f"CHECK записан в «{title}» строку {row_num}: {values[0]}")
-    # Красим только при явном подтверждении оплаты.
-    # Иначе оставляем белым — «не проверено».
-    if record.get("оплачено") is True:
-        try:
-            set_lesson_paid(_lid, True, title=title)
-        except Exception as e:  # noqa: BLE001
-            log(f"Не удалось покрасить сумму в зелёный: {e}")
-    elif record.get("оплачено") is False:
-        try:
-            set_lesson_paid(_lid, False, title=title)
-        except Exception as e:  # noqa: BLE001
-            log(f"Не удалось покрасить сумму в красный: {e}")
+    # Сумма всегда остаётся БЕЛОЙ: подтверждает и перекрашивает человек,
+    # а не бот. Цвет ставится вручную в таблице или кнопкой организатора.
     # цвет имени репетитора, если настроен
     try:
         _tcolor = get_tutor_color(tutor)
