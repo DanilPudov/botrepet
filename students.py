@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import datetime as dt
 
+import workspaces
 import sheets_util
 from sheets_util import load_config, log, names_match, norm_name
 
@@ -35,7 +36,7 @@ def ensure_sheet() -> str:
     """Создаёт лист «Ученики», если его нет."""
     from sheets_util import sheets
     cfg = load_config()
-    sh_id = cfg["sheets"]["history"]
+    sh_id = workspaces.spreadsheet()
     title = sheet_title()
     meta = sheets().spreadsheets().get(spreadsheetId=sh_id).execute()
     titles = [s["properties"]["title"] for s in meta.get("sheets", [])]
@@ -57,7 +58,7 @@ def ensure_sheet() -> str:
 def _rows() -> list[list[str]]:
     cfg = load_config()
     return sheets_util.get_values(
-        cfg["sheets"]["history"], f"'{sheet_title()}'!A1:{_LAST_COL}")
+        workspaces.spreadsheet(), f"'{sheet_title()}'!A1:{_LAST_COL}")
 
 
 def _cell(row: list[str], idx: int) -> str:
@@ -120,7 +121,7 @@ def add_student(tutor: str, student: str, parent: str = "", rate: str = "",
     """Добавляет ученика. Возвращает номер строки."""
     ensure_sheet()
     cfg = load_config()
-    sh_id = cfg["sheets"]["history"]
+    sh_id = workspaces.spreadsheet()
     rows = _rows()
     last = 1
     for n, row in enumerate(rows, start=1):
@@ -194,7 +195,7 @@ def update_student(tutor: str, student: str, *, new_name: str | None = None,
             return False
         row = found["row"]
     cfg = load_config()
-    sh_id = cfg["sheets"]["history"]
+    sh_id = workspaces.spreadsheet()
     cur = find_student(tutor, student) or {}
     values = [[
         tutor,
@@ -221,7 +222,7 @@ def update_student(tutor: str, student: str, *, new_name: str | None = None,
 def update_student_row(row: int, **fields) -> bool:
     """Обновить ученика по номеру строки (когда имена совпадают)."""
     cfg = load_config()
-    sh_id = cfg["sheets"]["history"]
+    sh_id = workspaces.spreadsheet()
     try:
         rows = _rows()
     except Exception:  # noqa: BLE001
@@ -262,7 +263,7 @@ def delete_student(tutor: str, student: str) -> bool:
     if row is None:
         return False
     cfg = load_config()
-    sh_id = cfg["sheets"]["history"]
+    sh_id = workspaces.spreadsheet()
     sheets_util.clear_values(
         sh_id, f"'{sheet_title()}'!A{row}:{_LAST_COL}{row}")
     log(f"УЧЕНИК удалён строка {row}: {tutor} — {student}")
