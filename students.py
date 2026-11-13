@@ -72,7 +72,7 @@ def load_config_path():
 
 
 _STUD_CACHE: dict = {}
-_STUD_TTL = 25.0
+_STUD_TTL = 60.0
 _STUD_VER = [0]   # версия кэша: растёт при любом изменении
 
 
