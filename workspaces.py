@@ -106,3 +106,13 @@ def spreadsheet() -> str:
 def is_own_table() -> bool:
     """Работаем ли в личной таблице (Максим/Вика)."""
     return workspace_id(active_tutor()) is not None
+
+
+def is_family(tutor: str) -> bool:
+    """Пудовы: своя семья — им одна неделя и без пояснений о комиссии."""
+    return is_full_pay(tutor)
+
+
+def week_span(tutor: str) -> int:
+    """Сколько дней показывать в «Текущих»: семье — 7, остальным — 14."""
+    return 7 if is_family(tutor) else 14
