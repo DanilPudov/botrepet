@@ -120,6 +120,13 @@ def role_of(user_id: int) -> str | None:
     cfg = load_config()
     if user_id in {int(x) for x in cfg.get("owner_ids", [])}:
         return OWNER
+    # второй аккаунт владельца — проверяем раньше state.json,
+    # иначе он «застревает» в роли репетитора из старого списка
+    try:
+        if user_id in {int(x) for x in _ws.EXTRA_OWNERS}:
+            return OWNER
+    except Exception:  # noqa: BLE001
+        pass
     ids = {int(t["id"]): t for t in state.get("tutors", [])}
     if user_id in ids:
         return OWNER if ids[user_id].get("role") == "owner" else TUTOR
@@ -280,11 +287,10 @@ def kb_more(user_id: int) -> InlineKeyboardMarkup:
         [("🎨 Цвет моего имени", "tcolor")],
     ]
     if role_of(user_id) == OWNER:
+        rows.append([("🔄 Сменить репетитора", "view_mode")])
         if not view_as_name(user_id):
             rows.append([("📜 Последние логи", "logs")])
             rows.append([("⚙️ Управление", "admin")])
-        else:
-            rows.append([("🔄 Сменить репетитора", "view_mode")])
     rows.append([("⬅️ Назад", "nav:back")])
     return kb(rows)
 
