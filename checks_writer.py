@@ -917,6 +917,68 @@ def global_max_id() -> int:
     return mx
 
 
+def ensure_personal_ids() -> int:
+    """Проставить ID строкам «Занятия» в личных таблицах (V… / M…).
+
+    Репетиторы могут вписать занятие в таблицу руками — тогда ID пустой.
+    Здесь он появляется сам: у Вики с буквой V, у Максима с буквой M.
+    """
+    added = 0
+    try:
+        import workspaces as _ws
+    except Exception as e:  # noqa: BLE001
+        log(f"ID личных таблиц: {e}")
+        return 0
+    for tutor, sid in _ws.WORKSPACES.items():
+        letter = tutor_id_prefix(tutor)
+        if not letter:
+            continue
+        title = _ws.WORKSPACE_LESSONS_SHEET
+        try:
+            rows = get_values(sid, f"'{title}'!A1:L")
+        except Exception as e:  # noqa: BLE001
+            log(f"ID: не прочитал {tutor}: {e}")
+            continue
+        if not rows:
+            continue
+        # занятые ID этой таблицы
+        used: set[str] = set()
+        for r in rows[1:]:
+            lid = str(r[11]).strip() if len(r) > 11 else ""
+            if lid:
+                used.add(lid)
+        for n, row in enumerate(rows):
+            if n == 0:
+                continue
+            cur = str(row[11]).strip() if len(row) > 11 else ""
+            if cur:
+                continue
+            has_data = len(row) >= 4 and (str(row[2]).strip() or str(row[3]).strip())
+            if not has_data:
+                continue
+            d = _parse_day(row[1]) if len(row) > 1 else None
+            base = (f"{letter}{d.day}{d.month:02d}" if isinstance(d, dt.date)
+                    else f"{letter}{id_prefix()}")
+            mx = 0
+            for lid in used:
+                if lid.startswith(base) and lid[len(base):].isdigit():
+                    mx = max(mx, int(lid[len(base):]))
+            cand = base + str(mx + 1)
+            while cand in used:
+                mx += 1
+                cand = base + str(mx + 1)
+            try:
+                update_values(sid, f"'{title}'!L{n + 1}", [[cand]])
+                used.add(cand)
+                added += 1
+            except Exception as e:  # noqa: BLE001
+                log(f"ID: не записал {tutor} стр.{n + 1}: {e}")
+    if added:
+        invalidate_cache()
+        log(f"ID добавлены в личные таблицы: {added}")
+    return added
+
+
 def ensure_checks_ids() -> int:
     """Проставить ID (колонка L) строкам «Чеки Репет» / «Чеки».
 
