@@ -4543,6 +4543,16 @@ async def _maybe_send_note(bot_obj, user_id) -> None:
         log(f"Не смог отправить отложенное уведомление: {e}")
 
 
+async def _ensure_accounts() -> None:
+    """Зарегистрировать Максима и Вику, если их нет в state."""
+    try:
+        added = _ws.ensure_tutors(load_state, save_state)
+        if added:
+            log(f"Зарегистрированы аккаунты: {', '.join(added)}")
+    except Exception as e:  # noqa: BLE001
+        log(f"Не удалось зарегистрировать аккаунты: {e}")
+
+
 async def _warm_cache(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Заранее прочитать таблицы в фоне — первый экран открывается сразу."""
     import asyncio as _aio
@@ -4627,6 +4637,7 @@ async def post_init(app: Application):
         BotCommand("faq", "FAQ"),
         BotCommand("help", "FAQ"),
     ])
+    await _ensure_accounts()
     try:
         await notify_update(app)
     except Exception as e:  # noqa: BLE001
