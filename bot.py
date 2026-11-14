@@ -120,13 +120,9 @@ def role_of(user_id: int) -> str | None:
     cfg = load_config()
     if user_id in {int(x) for x in cfg.get("owner_ids", [])}:
         return OWNER
-    # второй аккаунт владельца — проверяем раньше state.json,
-    # иначе он «застревает» в роли репетитора из старого списка
-    try:
-        if user_id in {int(x) for x in _ws.EXTRA_OWNERS}:
-            return OWNER
-    except Exception:  # noqa: BLE001
-        pass
+    # «Данил 2» — обычный репетитор (без админ-панели)
+    if _ws.is_test_account(user_id):
+        return TUTOR
     ids = {int(t["id"]): t for t in state.get("tutors", [])}
     if user_id in ids:
         return OWNER if ids[user_id].get("role") == "owner" else TUTOR
@@ -195,6 +191,9 @@ def name_by_id(user_id: int) -> str | None:
     if va:
         _ws.set_active(va)
         return va
+    if _ws.is_test_account(user_id):
+        # без выбора ещё никого — имя появится после выбора
+        return None
     for t in load_state().get("tutors", []):
         if int(t["id"]) == user_id:
             return t.get("name")
@@ -291,6 +290,8 @@ def kb_more(user_id: int) -> InlineKeyboardMarkup:
         if not view_as_name(user_id):
             rows.append([("📜 Последние логи", "logs")])
             rows.append([("⚙️ Управление", "admin")])
+    elif _ws.is_test_account(user_id):
+        rows.append([("🔄 Сменить репетитора", "view_mode")])
     rows.append([("⬅️ Назад", "nav:back")])
     return kb(rows)
 
@@ -298,7 +299,7 @@ def kb_more(user_id: int) -> InlineKeyboardMarkup:
 async def show_main(update: Update, context: ContextTypes.DEFAULT_TYPE, edit=False):
     text = MAIN_TEXT
     va = view_as_name(update.effective_user.id)
-    if va:
+    if va and not _ws.is_test_account(update.effective_user.id):
         text = f"🔎 Режим просмотра: {va}\n\n" + text
     markup = kb_main(update.effective_user.id)
     if edit and update.callback_query:
@@ -328,6 +329,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    if _ws.is_test_account(user.id) and not view_as_name(user.id):
+        await show_owner_picker(update, context, edit=False)
+        return
     if role == OWNER and not view_as_name(user.id):
         await show_owner_picker(update, context, edit=False)
         return
@@ -349,6 +353,8 @@ def has_call_name(user_id: int) -> bool:
 
 def _view_allowed(user_id: int) -> list[str] | None:
     """Каких репетиторов может смотреть этот аккаунт (None — всех)."""
+    if _ws.is_test_account(user_id):
+        return [norm_name(x) for x in _ws.TEST_ACCOUNT_TUTORS]
     st = load_state()
     for t in st.get("tutors", []):
         try:
@@ -376,9 +382,12 @@ async def show_owner_picker(update: Update, context: ContextTypes.DEFAULT_TYPE,
             continue
         names.append(nm)
     rows = [[(n, f"view:{i}")] for i, n in enumerate(names)]
-    rows.append([("👤 Мой профиль", "view:me")])
-    text = ("👋 Вы организатор.\n\n"
-            "За кого зайти, чтобы посмотреть его бота?")
+    if _ws.is_test_account(user.id):
+        text = "Кем будем работать?"
+    else:
+        rows.append([("👤 Мой профиль", "view:me")])
+        text = ("👋 Вы организатор.\n\n"
+                "За кого зайти, чтобы посмотреть его бота?")
     markup = kb(rows)
     if edit and update.callback_query:
         await update.callback_query.edit_message_text(text, reply_markup=markup)
