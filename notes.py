@@ -37,6 +37,10 @@ def _header_matches(row: list[str] | None) -> bool:
 
 
 def _rows() -> list[list[str]]:
+    try:
+        ensure_sheet()
+    except Exception as e:  # noqa: BLE001
+        log(f"Не смог подготовить лист «{SHEET}»: {e}")
     return sheets_util.get_values(_history_id(), f"'{SHEET}'!A1:C")
 
 
