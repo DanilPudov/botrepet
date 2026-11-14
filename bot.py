@@ -4852,7 +4852,13 @@ def main():
         # кэш живёт 60 с — обновляем каждые 45 с, чтобы он не остывал
         app.job_queue.run_repeating(refresh_cache_job, interval=45, first=50)
 
-    log(f"Бот запущен. Режим доступа: {cfg.get('access')}")
+    import hashlib as _hl
+    try:
+        _src = (sheets_util.BASE_DIR / "bot.py").read_bytes()
+        _ver = _hl.sha1(_src).hexdigest()[:8]
+    except Exception:  # noqa: BLE001
+        _ver = "?"
+    log(f"Бот запущен. Сборка {_ver}. Режим доступа: {cfg.get('access')}")
     try:
         app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
     except InvalidToken:
