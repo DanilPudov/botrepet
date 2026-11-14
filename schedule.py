@@ -48,6 +48,37 @@ def _rows() -> list[list[str]]:
     return sheets_util.get_values(workspaces.spreadsheet(), f"'{SHEET}'!A1:I")
 
 
+def _rows_all() -> list[list[str]]:
+    """Расписание из ВСЕХ таблиц: главная + личные (Максим, Вика).
+
+    Без этого напоминания и общий список не видели расписание
+    репетиторов с собственной книгой.
+    """
+    out: list[list[str]] = []
+    seen_sh: set[str] = set()
+    # главная таблица
+    try:
+        out.extend(_rows())
+        seen_sh.add(workspaces.spreadsheet())
+    except Exception as e:  # noqa: BLE001
+        log(f"Не прочитал расписание главной: {e}")
+    # личные таблицы
+    try:
+        for _tutor, sid in workspaces.WORKSPACES.items():
+            if sid in seen_sh:
+                continue
+            try:
+                rows = sheets_util.get_values(sid, f"'{SHEET}'!A1:I")
+                for row in rows[1:]:
+                    if row:
+                        out.append(row)
+            except Exception as e:  # noqa: BLE001
+                log(f"Не прочитал расписание {_tutor}: {e}")
+    except Exception as e:  # noqa: BLE001
+        log(f"Личные расписания не прочитаны: {e}")
+    return out
+
+
 def _next_id() -> int:
     mx = 0
     for n, row in enumerate(_rows(), start=1):
@@ -306,9 +337,9 @@ def delete_entry(entry_id: int) -> bool:
 
 
 def all_entries() -> list[dict]:
-    """Все активные записи расписания по всем репетиторам."""
+    """Все активные записи расписания по всем репетиторам (все таблицы)."""
     out = []
-    for n, row in enumerate(_rows(), start=1):
+    for n, row in enumerate(_rows_all(), start=1):
         if n == 1 or len(row) < 6 or not norm_name(row[1]):
             continue
         if len(row) > 7 and row[7].strip().lower() in ("0", "нет", "false"):
