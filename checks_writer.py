@@ -814,7 +814,14 @@ def lesson_flags() -> dict[str, str]:
             r = float(fg.get("red", 0))
             g = float(fg.get("green", 0))
             b = float(fg.get("blue", 0))
-            out[lid] = _color_to_status(r, g, b)
+            status = _color_to_status(r, g, b)
+            # Ключ — (лист, ID): одинаковый ID в разных листах не должен
+            # перекрывать статус. Плоский ключ оставляем для совместимости.
+            out[(title, lid)] = status
+            if lid in out and out[lid] != status:
+                out[lid] = ""      # разные листы дают разный цвет — неизвестно
+            else:
+                out[lid] = status
 
     try:
         meta = sheets().spreadsheets().get(spreadsheetId=hist_id).execute()
@@ -1231,8 +1238,16 @@ def read_lessons(include_history: bool = False,
     seen: set[tuple] = set()
     unique: list[dict] = []
     for les in lessons:
-        dedup_key = (les["репетитор"], les["дата"], norm_name(les["ученик"]),
-                     les["сумма"], str(les.get("время", "")))
+        # Дедуп по ID: две разные строки с одинаковым содержимым
+        # (реальный дубль или два занятия с той же суммой) — это разные
+        # занятия, их нельзя склеивать. Без ID — по содержимому.
+        lid = str(les.get("id") or "").strip()
+        if lid:
+            dedup_key = (les.get("лист"), lid)
+        else:
+            dedup_key = (les["репетитор"], les["дата"],
+                         norm_name(les["ученик"]), les["сумма"],
+                         str(les.get("время", "")))
         if dedup_key in seen:
             continue
         seen.add(dedup_key)
