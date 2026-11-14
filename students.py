@@ -32,10 +32,10 @@ def sheet_title() -> str:
     return load_config().get("sheets", {}).get("students_sheet", "Ученики")
 
 
-def ensure_sheet() -> str:
+def ensure_sheet(tutor: str = "") -> str:
     """Создаёт лист «Ученики» при отсутствии, иначе дотягивает шапку до I."""
     from sheets_util import sheets
-    sh_id = workspaces.spreadsheet()
+    sh_id = workspaces.spreadsheet_for(tutor)
     title = sheet_title()
     if title not in sheets_util.sheet_titles(sh_id):
         sheets().spreadsheets().batchUpdate(
@@ -53,13 +53,13 @@ def ensure_sheet() -> str:
     return title
 
 
-def _rows() -> list[list[str]]:
+def _rows(tutor: str = "") -> list[list[str]]:
     try:
-        ensure_sheet()
+        ensure_sheet(tutor)
     except Exception as e:  # noqa: BLE001 — лист создастся при записи
         log(f"Не смог подготовить лист «{sheet_title()}»: {e}")
     return sheets_util.get_values(
-        workspaces.spreadsheet(), f"'{sheet_title()}'!A1:{_LAST_COL}")
+        workspaces.spreadsheet_for(tutor), f"'{sheet_title()}'!A1:{_LAST_COL}")
 
 
 def _cell(row: list[str], idx: int) -> str:
@@ -91,7 +91,7 @@ def students_of(tutor: str) -> list[dict]:
         return hit[1]
     out: list[dict] = []
     seen: set[tuple] = set()
-    for n, row in enumerate(_rows(), start=1):
+    for n, row in enumerate(_rows(tutor), start=1):
         if n == 1 or len(row) < 2 or not norm_name(row[0]):
             continue
         if not names_match(row[0], tutor):
@@ -120,10 +120,10 @@ def add_student(tutor: str, student: str, parent: str = "", rate: str = "",
                 comment: str = "", student_link: str = "",
                 parent_link: str = "", sender: str = "") -> int:
     """Добавляет ученика. Возвращает номер строки."""
-    ensure_sheet()
+    ensure_sheet(tutor)
     cfg = load_config()
-    sh_id = workspaces.spreadsheet()
-    rows = _rows()
+    sh_id = workspaces.spreadsheet_for(tutor)
+    rows = _rows(tutor)
     last = 1
     for n, row in enumerate(rows, start=1):
         if any(str(x).strip() for x in row):
@@ -196,7 +196,7 @@ def update_student(tutor: str, student: str, *, new_name: str | None = None,
             return False
         row = found["row"]
     cfg = load_config()
-    sh_id = workspaces.spreadsheet()
+    sh_id = workspaces.spreadsheet_for(tutor)
     cur = find_student(tutor, student) or {}
     values = [[
         tutor,
@@ -220,12 +220,12 @@ def update_student(tutor: str, student: str, *, new_name: str | None = None,
 
 
 
-def update_student_row(row: int, **fields) -> bool:
+def update_student_row(row: int, tutor: str = "", **fields) -> bool:
     """Обновить ученика по номеру строки (когда имена совпадают)."""
     cfg = load_config()
-    sh_id = workspaces.spreadsheet()
+    sh_id = workspaces.spreadsheet_for(tutor)
     try:
-        rows = _rows()
+        rows = _rows(tutor)
     except Exception:  # noqa: BLE001
         return False
     if row < 2 or row > len(rows):
@@ -264,7 +264,7 @@ def delete_student(tutor: str, student: str) -> bool:
     if row is None:
         return False
     cfg = load_config()
-    sh_id = workspaces.spreadsheet()
+    sh_id = workspaces.spreadsheet_for(tutor)
     sheets_util.clear_values(
         sh_id, f"'{sheet_title()}'!A{row}:{_LAST_COL}{row}")
     log(f"УЧЕНИК удалён строка {row}: {tutor} — {student}")
