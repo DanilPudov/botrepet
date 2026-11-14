@@ -56,7 +56,10 @@ def ensure_sheet() -> str:
 
 
 def _rows() -> list[list[str]]:
-    cfg = load_config()
+    try:
+        ensure_sheet()
+    except Exception as e:  # noqa: BLE001 — лист создастся при записи
+        log(f"Не смог подготовить лист «{sheet_title()}»: {e}")
     return sheets_util.get_values(
         workspaces.spreadsheet(), f"'{sheet_title()}'!A1:{_LAST_COL}")
 
