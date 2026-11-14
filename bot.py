@@ -4565,6 +4565,23 @@ async def _warm_cache(context: ContextTypes.DEFAULT_TYPE) -> None:
         log(f"Прогрев кэша не удался: {e}")
 
 
+async def refresh_cache_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Держать кэш тёплым: обновлять данные в фоне, чтобы бот отвечал мгновенно."""
+    import asyncio as _aio
+
+    def _refresh() -> None:
+        try:
+            checks_writer.read_lessons(include_history=True)
+            checks_writer.lesson_flags()
+        except Exception as e:  # noqa: BLE001
+            log(f"Фоновое обновление кэша не удалось: {e}")
+
+    try:
+        await _aio.to_thread(_refresh)
+    except Exception as e:  # noqa: BLE001
+        log(f"Фоновое обновление кэша не удалось: {e}")
+
+
 async def check_suggestions_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Раз в час: проверить таблицу предложений и напомнить о новых."""
     try:
@@ -4808,6 +4825,8 @@ def main():
         app.job_queue.run_daily(reschedule_reminders, time=dt.time(hour=0, minute=10))
         app.job_queue.run_repeating(check_suggestions_job, interval=3600, first=90)
         app.job_queue.run_once(_warm_cache, when=1)
+        # кэш живёт 60 с — обновляем каждые 45 с, чтобы он не остывал
+        app.job_queue.run_repeating(refresh_cache_job, interval=45, first=50)
 
     log(f"Бот запущен. Режим доступа: {cfg.get('access')}")
     try:
