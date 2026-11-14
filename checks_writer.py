@@ -31,6 +31,7 @@ HEADER = ["Время (ПО ЧЕКУ)", "Дата", "Репетитор", "Им�
 TARGET_HISTORY_SHEET = "Занятия"
 
 WHITE = {"red": 1, "green": 1, "blue": 1}
+BLACK = {"red": 0, "green": 0, "blue": 0}
 BORDER = {"red": 0.2627451, "green": 0.2627451, "blue": 0.2627451}
 
 
@@ -110,10 +111,21 @@ def _target(tutor: str = "") -> tuple[str, str]:
     return cfg["sheets"]["recept"], cfg["sheets"]["recept_checks_sheet"]
 
 
-def target_name() -> str:
+def target_name(tutor: str = "") -> str:
+    """Куда записано занятие — человеческим языком, по факту."""
     cfg = load_config()
+    try:
+        import workspaces as _ws
+        sid = _ws.workspace_id(tutor) if tutor else None
+        if sid:
+            owner = "Максима" if "Максим" in tutor else (
+                "Вики" if "Вик" in tutor else "")
+            base = (f"таблица {owner}".strip() if owner else "личная таблица")
+            return f"{base} / «{_ws.WORKSPACE_LESSONS_SHEET}»"
+    except Exception:  # noqa: BLE001
+        pass
     if _write_cfg().get("target", "recept") == "history":
-        return f"«История» / {_target()[1]}"
+        return f"«История» / {_target(tutor)[1]}"
     return f"«Чеки Репет» / {cfg['sheets']['recept_checks_sheet']}"
 
 
@@ -196,8 +208,20 @@ def find_next_free_row(title: str | None = None,
     return max(last + 1, FIRST_DATA_ROW)
 
 
+def _text_color(sh_id: str) -> dict:
+    """Цвет текста: в личных таблицах (Максим, Вика) — чёрный, иначе белый."""
+    try:
+        import workspaces as _ws
+        for sid in _ws.WORKSPACES.values():
+            if sid == sh_id:
+                return BLACK
+    except Exception:  # noqa: BLE001
+        pass
+    return WHITE
+
+
 def _format_row(sh_id: str, title: str, row: int) -> None:
-    """Белый текст, по центру, без фона, тонкие серые границы — как в «Чеках»."""
+    """Текст по центру, без фона, тонкие серые границы — как в «Чеках»."""
     from sheets_util import sheets
     rng = {"sheetId": None, "startRowIndex": row - 1, "endRowIndex": row,
            "startColumnIndex": 0, "endColumnIndex": 10}
@@ -205,7 +229,7 @@ def _format_row(sh_id: str, title: str, row: int) -> None:
         {"repeatCell": {
             "range": rng,
             "cell": {"userEnteredFormat": {
-                "textFormat": {"foregroundColor": WHITE},
+                "textFormat": {"foregroundColor": _text_color(sh_id)},
                 "horizontalAlignment": "CENTER",
                 "verticalAlignment": "MIDDLE",
             }},
@@ -463,6 +487,13 @@ def _all_sheet_targets() -> list[tuple[str, str]]:
         out.append((hist_id, t))
     # «Чеки Репет» → «Чеки» (основной лист репетиторов)
     out.append((cfg["sheets"]["recept"], cfg["sheets"]["recept_checks_sheet"]))
+    # личные таблицы (Максим, Вика) — свои листы «Занятия»
+    try:
+        import workspaces as _ws
+        for _tutor, _sid in _ws.WORKSPACES.items():
+            out.append((_sid, _ws.WORKSPACE_LESSONS_SHEET))
+    except Exception as e:  # noqa: BLE001
+        log(f"Личные таблицы для флажков не добавлены: {e}")
     return out
 
 
@@ -744,6 +775,13 @@ def lesson_flags() -> dict[str, str]:
     for title in [t for t in titles if t == "Занятия" or t.startswith("История")]:
         _scan(hist_id, title)
     _scan(recept_id, checks_title)
+    # личные таблицы (Максим, Вика): свои листы «Занятия»
+    try:
+        import workspaces as _ws
+        for _tutor, _sid in _ws.WORKSPACES.items():
+            _scan(_sid, _ws.WORKSPACE_LESSONS_SHEET)
+    except Exception as e:  # noqa: BLE001
+        log(f"Не прочитал флажки личных таблиц: {e}")
 
     return _cache_put(("flags",), out)
 
@@ -792,6 +830,20 @@ def _ids_from_all() -> list[str]:
                 if len(r) > 11 and str(r[11]).strip()]
     except Exception as e:  # noqa: BLE001
         log(f"ID: не прочитал «Чеки»: {e}")
+
+    # личные таблицы (Максим, Вика) — иначе там появлялись те же ID
+    try:
+        import workspaces as _ws
+        for _tutor, _sid in _ws.WORKSPACES.items():
+            try:
+                vals = get_values_batch(
+                    _sid, [f"'{_ws.WORKSPACE_LESSONS_SHEET}'!A1:L"])[0]
+                out += [str(r[11]).strip() for r in vals[1:]
+                        if len(r) > 11 and str(r[11]).strip()]
+            except Exception as e:  # noqa: BLE001
+                log(f"ID: не прочитал {_tutor}: {e}")
+    except Exception as e:  # noqa: BLE001
+        log(f"ID: личные таблицы не прочитаны: {e}")
     return out
 
 
