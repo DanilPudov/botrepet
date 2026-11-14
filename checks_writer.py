@@ -168,7 +168,34 @@ def is_data_row(row: list) -> bool:
     return any(_cell(row, i) for i in KEY_COLS)
 
 
-def next_lesson_id(title: str | None = None) -> int:
+def tutor_id_prefix(tutor: str = "") -> str:
+    """Буква в начале ID для личных таблиц: V — Вика, M — Максим."""
+    try:
+        import workspaces as _ws
+        t = _ws.canon_tutor(tutor)
+        if t == "Виктория Пудова":
+            return "V"
+        if t == "Максим Пудов":
+            return "M"
+    except Exception:  # noqa: BLE001
+        pass
+    return ""
+
+
+def next_lesson_id(title: str | None = None, tutor: str = "") -> str:
+    """Следующий ID: [буква]DDMM + счётчик (12111, V12111, M12112)."""
+    prefix = tutor_id_prefix(tutor) + id_prefix()
+    mx = 0
+    for lid in _ids_from_all():
+        if not lid.startswith(prefix):
+            continue
+        suffix = lid[len(prefix):]
+        if suffix.isdigit():
+            mx = max(mx, int(suffix))
+    return prefix + str(mx + 1)
+
+
+def next_lesson_id_old(title: str | None = None) -> int:
     """Следующий ID: префикс DDMM + счётчик (12111, 12112, … 121110)."""
     prefix = id_prefix()
     mx = 0
@@ -274,7 +301,7 @@ def append_check(record: dict) -> int:
     ensure_target_sheet(title, sh_id)
 
     row_num = find_next_free_row(title, sh_id)
-    _lid = str(next_lesson_id(title))
+    _lid = str(next_lesson_id(title, tutor))
     values = [[
         record.get("время", ""),
         record.get("дата", ""),
@@ -692,6 +719,26 @@ def set_lesson_paid(lesson_id, paid: bool, title: str | None = None) -> bool:
     return True
 
 
+def _color_to_status(r: float, g: float, b: float) -> str:
+    """Любой оттенок зелёного -> paid, красного -> no, иначе не проверено.
+
+    В Google доступны десятки оттенков, поэтому смотрим на доминирующий
+    канал, а не на конкретный цвет:
+      • зелёный перевешивает красный и синий  -> ✅ оплачено
+      • красный перевешивает зелёный и синий  -> ❌ отклонено
+      • чёрный/белый/серый/синий и прочее     -> ⚪️ не проверено
+    """
+    # серый/чёрный/белый — все каналы близки
+    hi, lo = max(r, g, b), min(r, g, b)
+    if hi - lo < 0.12:
+        return ""
+    if g > r and g > b:
+        return "paid"
+    if r > g and r > b:
+        return "no"
+    return ""
+
+
 def lesson_flags() -> dict[str, str]:
     """{id занятия: 'paid'|'no'|''} по цвету суммы (колонка F).
 
@@ -760,12 +807,8 @@ def lesson_flags() -> dict[str, str]:
                 continue
             r = float(fg.get("red", 0))
             g = float(fg.get("green", 0))
-            if g > 0.4 and r < 0.4:
-                out[lid] = "paid"
-            elif r > 0.4 and g < 0.4:
-                out[lid] = "no"
-            else:
-                out.setdefault(lid, "")
+            b = float(fg.get("blue", 0))
+            out[lid] = _color_to_status(r, g, b)
 
     try:
         meta = sheets().spreadsheets().get(spreadsheetId=hist_id).execute()
