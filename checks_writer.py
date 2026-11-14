@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import threading
 
 from sheets_util import get_values, update_values, load_config, log, norm_name, _exec
 
@@ -294,14 +295,19 @@ def _format_row(sh_id: str, title: str, row: int) -> None:
         spreadsheetId=sh_id, body={"requests": requests}).execute()
 
 
+# Блокировка записи: два одновременных запроса не должны получить один ID
+# и не должны занять одну и ту же свободную строку.
+_ID_LOCK = threading.Lock()
+
+
 def append_check(record: dict) -> int:
     """Дописывает занятие в свободную строку. Возвращает номер строки."""
     tutor = record.get("репетитор", "")
     sh_id, title = _target(tutor)
-    ensure_target_sheet(title, sh_id)
-
-    row_num = find_next_free_row(title, sh_id)
-    _lid = str(next_lesson_id(title, tutor))
+    with _ID_LOCK:
+        ensure_target_sheet(title, sh_id)
+        row_num = find_next_free_row(title, sh_id)
+        _lid = str(next_lesson_id(title, tutor))
     values = [[
         record.get("время", ""),
         record.get("дата", ""),
