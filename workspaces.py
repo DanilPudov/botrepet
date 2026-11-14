@@ -16,6 +16,28 @@ PERSONAL_SHEETS = {
 # Кому показывать 100% (без вычета 20%)
 FULL_PAY_TUTORS = ("Данил Пудов", "Виктория Пудова", "Максим Пудов")
 
+# Аккаунты и их ID — регистрируются сами при старте бота
+WORKSPACE_TUTORS = [
+    (993211158, "Максим Пудов"),
+    (5992545540, "Виктория Пудова"),
+]
+
+
+def ensure_tutors(load_state, save_state_fn) -> list[str]:
+    """Добавить Максима и Вику в state, если их там нет. Вернуть добавленных."""
+    st = load_state()
+    tutors = st.setdefault("tutors", [])
+    have = {int(t["id"]) for t in tutors if str(t.get("id", "")).lstrip("-").isdigit()}
+    added: list[str] = []
+    for tid, name in WORKSPACE_TUTORS:
+        if tid not in have:
+            tutors.append({"id": tid, "name": name})
+            added.append(name)
+    if added:
+        save_state_fn(st)
+    return added
+
+
 # Название листа занятий в личной таблице
 WORKSPACE_LESSONS_SHEET = "Занятия"
 
