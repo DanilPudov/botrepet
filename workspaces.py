@@ -120,16 +120,19 @@ def payout_note(tutor: str) -> str:
 # --------------------------------------------------------------------------- #
 # Активный репетитор: по нему модули выбирают свою или общую таблицу
 # --------------------------------------------------------------------------- #
-_ACTIVE = {"tutor": ""}
+# contextvars: у каждого запроса свой репетитор, не путаются между собой
+import contextvars as _ctx
+
+_ACTIVE: _ctx.ContextVar[str] = _ctx.ContextVar("active_tutor", default="")
 
 
 def set_active(tutor: str) -> None:
-    """Запомнить, от чьего имени сейчас работаем."""
-    _ACTIVE["tutor"] = canon_tutor(tutor or "")
+    """Запомнить, от чьего имени сейчас работаем (в рамках текущего запроса)."""
+    _ACTIVE.set(canon_tutor(tutor or ""))
 
 
 def active_tutor() -> str:
-    return _ACTIVE.get("tutor") or ""
+    return _ACTIVE.get() or ""
 
 
 def spreadsheet() -> str:
