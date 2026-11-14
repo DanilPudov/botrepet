@@ -178,7 +178,12 @@ def view_as_name(user_id: int) -> str | None:
 
 
 def _full_name(user_id: int) -> str | None:
-    """Имя и фамилия для журнала: как записан в настройках."""
+    """Имя для журнала. У аккаунта «Данил 2» — своя подпись."""
+    try:
+        if _ws.is_test_account(user_id):
+            return "Данил 2"
+    except Exception:  # noqa: BLE001
+        pass
     for t in load_state().get("tutors", []):
         if int(t["id"]) == user_id:
             name = (t.get("name") or "").strip()
@@ -2765,7 +2770,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                    f"{p.get('время','') or 'без времени'})")
         await notify_owner(context, p, row)
         tm = f" {p['время']}" if p.get("время") else ", без времени"
-        where = checks_writer.target_name()
+        where = checks_writer.target_name(p.get('репетитор') or '')
         note = ""
         try:
             others = [
