@@ -128,7 +128,7 @@ def sheets():
                 _sheets_client = build("sheets", "v4", credentials=creds,
                                        cache_discovery=False,
                                        static_discovery=False)
-                return _sheets_client
+                return _RetryProxy(_sheets_client)
             except Exception as e:  # noqa: BLE001
                 log(f"Ключ Google из переменной окружения не подошёл: {e}")
 
@@ -153,7 +153,7 @@ def sheets():
         _sheets_client = build("sheets", "v4", credentials=creds,
                                cache_discovery=False,
                                static_discovery=False)
-    return _sheets_client
+    return _RetryProxy(_sheets_client)
 
 
 def _is_retryable(e: Exception) -> bool:
@@ -169,6 +169,40 @@ def _is_retryable(e: Exception) -> bool:
         if token in low:
             return True
     return False
+
+
+class _RetryProxy:
+    """Обёртка клиента Google: любой .execute() повторяется при 429 и SSL-обрывах.
+
+    Так повтор работает для ВСЕХ запросов сразу — и чтения, и записи,
+    и запросы структуры книги, — а не только для тех, что обёрнуты вручную.
+    """
+    __slots__ = ("_obj",)
+
+    def __init__(self, obj):
+        object.__setattr__(self, "_obj", obj)
+
+    def __getattr__(self, name):
+        attr = getattr(object.__getattribute__(self, "_obj"), name)
+        if not callable(attr):
+            return attr
+
+        def _call(*a, **kw):
+            res = attr(*a, **kw)
+            if isinstance(res, (dict, list, str, int, float, bool)) or res is None:
+                return res
+            return _RetryProxy(res)
+
+        return _call
+
+    def execute(self, *a, **kw):
+        obj = object.__getattribute__(self, "_obj")
+        return _retry_429(lambda: obj.execute(*a, **kw))
+
+
+def _exec(request):
+    """Выполнить запрос Google с повтором на 429 и обрывы соединения."""
+    return _retry_429(lambda: request.execute())
 
 
 def _drop_client() -> None:
@@ -217,7 +251,7 @@ def sheet_titles(sh_id: str, refresh: bool = False) -> list[str]:
         if hit and now - hit[0] < _SHEETS_TTL:
             return hit[1]
     try:
-        meta = sheets().spreadsheets().get(spreadsheetId=sh_id).execute()
+        meta = _exec(sheets().spreadsheets().get(spreadsheetId=sh_id))
         titles = [s["properties"]["title"] for s in meta.get("sheets", [])]
     except Exception:
         hit = _SHEETS_TITLES.get(sh_id)
