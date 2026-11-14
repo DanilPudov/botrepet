@@ -810,6 +810,7 @@ async def _process_schedule_queue(update, context, p) -> None:
         p["added"] = int(p.get("added", 0)) + 1
         set_pending(user.id, p)
 
+    await _resched_now(context)
     done = f"✅ Добавлено: {p.get('added', 0)}, удалено: {p.get('removed', 0)}."
     await _finish_schedule_edit(update, context, p, done)
 
@@ -3375,6 +3376,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         parse_mode=ParseMode.MARKDOWN,
                         reply_markup=kb([[("⬅️ Назад", "sch:list")]]))
             return
+        await _resched_now(context)
         p["шаг"] = "карточка_ученика"
         set_pending(user.id, p)
         await _finish_with_card(update, context, p,
@@ -3555,6 +3557,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         schedule_module.add_one_time(tutor, student, parent or st.get("родитель", ""),
                                      d, t, st.get("тариф", ""))
+        await _resched_now(context)
         set_pending(user.id, None)
         await _send(update, f"✅ Разовое: {d:%d.%m} {t} {student}.",
                     reply_markup=kb([[("📅 Расписание", "sched:week")]]))
@@ -3586,6 +3589,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             p.get("репетитор", ""), p.get("ученик", ""),
             st.get("родитель", ""), d, t,
             p.get("сумма") or st.get("тариф", ""))
+        await _resched_now(context)
         set_pending(user.id, None)
         await _send(update,
                     f"🔁 Перенесено на {d:%d.%m.%Y} {t}.\n"
@@ -3683,6 +3687,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 tutor_of(p, user), p.get("ученик", ""), p.get("родитель", ""),
                 schedule_module.DAY_NAMES[days[0]], t, p.get("тариф", ""))
             added += 1
+        if added:
+            await _resched_now(context)
         p["шаг"] = "карточка_ученика"
         set_pending(user.id, p)
         done = (f"✅ Занятий добавлено: {added}" if added
@@ -4427,6 +4433,19 @@ async def send_lesson_reminder(context: ContextTypes.DEFAULT_TYPE):
         log(f"Напоминание не доставлено: {e}")
 
 
+async def _resched_now(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Сразу пересчитать напоминания после изменения расписания.
+
+    Без этого новое занятие ждало очередного часового пересчёта.
+    """
+    try:
+        if getattr(context, "job_queue", None) is None:
+            return
+        await reschedule_reminders(context)
+    except Exception as e:  # noqa: BLE001
+        log(f"Не смог обновить напоминания: {e}")
+
+
 async def reschedule_reminders(context: ContextTypes.DEFAULT_TYPE):
     """Разослать напоминания на ближайшие занятия (включая разовые)."""
     now = dt.datetime.now()
@@ -4905,7 +4924,7 @@ def main():
 
     if app.job_queue is not None:
         app.job_queue.run_once(reschedule_reminders, when=5)
-        app.job_queue.run_repeating(reschedule_reminders, interval=3600, first=60)
+        app.job_queue.run_repeating(reschedule_reminders, interval=600, first=60)
         app.job_queue.run_daily(reschedule_reminders, time=dt.time(hour=0, minute=10))
         app.job_queue.run_repeating(check_suggestions_job, interval=3600, first=90)
         app.job_queue.run_once(_warm_cache, when=1)
