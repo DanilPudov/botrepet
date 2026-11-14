@@ -28,16 +28,14 @@ FULL_DAY_NAMES = ["понедельник", "вторник", "среда", "ч�
 
 def ensure_sheet() -> str:
     from sheets_util import sheets
-    cfg = load_config()
     sh_id = workspaces.spreadsheet()
-    meta = sheets().spreadsheets().get(spreadsheetId=sh_id).execute()
-    titles = [s["properties"]["title"] for s in meta.get("sheets", [])]
-    if SHEET in titles:
+    if SHEET in sheets_util.sheet_titles(sh_id):
         return SHEET
     sheets().spreadsheets().batchUpdate(
         spreadsheetId=sh_id,
         body={"requests": [{"addSheet": {"properties": {"title": SHEET}}}]}).execute()
     sheets_util.update_values(sh_id, f"'{SHEET}'!A1:I1", [COLUMNS])
+    sheets_util.forget_sheet_titles(sh_id)
     log(f"Создан лист «{SHEET}»")
     return SHEET
 
