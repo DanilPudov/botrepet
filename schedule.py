@@ -340,11 +340,15 @@ def update_entry(entry_id, day: str, time_str: str,
     for n, row in enumerate(rows, start=1):
         if n == 1 or not row:
             continue
-        if str(row[0]).strip() == str(entry_id):
-            sheets_util.update_values(
-                sh_id, f"'{SHEET}'!E{n}:F{n}", [[day, time_str]])
-            log(f"РАСПИСАНИЕ обновлено id={entry_id}: {day} {time_str}")
-            return True
+        if str(row[0]).strip() != str(entry_id):
+            continue
+        # ID может совпасть у разных репетиторов в одном листе
+        if tutor and len(row) > 1 and not names_match(row[1], tutor):
+            continue
+        sheets_util.update_values(
+            sh_id, f"'{SHEET}'!E{n}:F{n}", [[day, time_str]])
+        log(f"РАСПИСАНИЕ обновлено id={entry_id}: {day} {time_str}")
+        return True
     return False
 
 
@@ -422,10 +426,13 @@ def update_last_date(entry_id, day: dt.date, tutor: str = "",
     for n, row in enumerate(rows, start=1):
         if n == 1 or not row:
             continue
-        if str(row[0]).strip() == str(entry_id):
-            sheets_util.update_values(
-                sh_id, f"'{SHEET}'!I{n}", [[day.strftime("%d.%m.%Y")]])
-            return
+        if str(row[0]).strip() != str(entry_id):
+            continue
+        if tutor and len(row) > 1 and not names_match(row[1], tutor):
+            continue
+        sheets_util.update_values(
+            sh_id, f"'{SHEET}'!I{n}", [[day.strftime("%d.%m.%Y")]])
+        return
 
 
 def delete_entry(entry_id, tutor: str = "", sh_id: str = "") -> bool:
@@ -436,10 +443,13 @@ def delete_entry(entry_id, tutor: str = "", sh_id: str = "") -> bool:
     for n, row in enumerate(rows, start=1):
         if n == 1 or not row:
             continue
-        if str(row[0]).strip() == str(entry_id):
-            sheets_util.clear_values(sh_id, f"'{SHEET}'!A{n}:I{n}")
-            log(f"РАСПИСАНИЕ удалено id={entry_id}")
-            return True
+        if str(row[0]).strip() != str(entry_id):
+            continue
+        if tutor and len(row) > 1 and not names_match(row[1], tutor):
+            continue
+        sheets_util.clear_values(sh_id, f"'{SHEET}'!A{n}:I{n}")
+        log(f"РАСПИСАНИЕ удалено id={entry_id}")
+        return True
     return False
 
 
