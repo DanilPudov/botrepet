@@ -53,15 +53,19 @@ def id_letter(tutor: str) -> str:
 def _rows_for(tutor: str) -> list[list[str]]:
     """Расписание из таблицы конкретного репетитора."""
     try:
+        ensure_sheet(tutor)
+    except Exception as e:  # noqa: BLE001
+        log(f"Не смог подготовить лист «{SHEET}» для {tutor}: {e}")
+    try:
         return sheets_util.get_values(sheet_for(tutor), f"'{SHEET}'!A1:I")
     except Exception as e:  # noqa: BLE001
         log(f"Не прочитал расписание {tutor}: {e}")
         return []
 
 
-def ensure_sheet() -> str:
+def ensure_sheet(tutor: str = "") -> str:
     from sheets_util import sheets
-    sh_id = workspaces.spreadsheet()
+    sh_id = sheet_for(tutor)
     if SHEET in sheets_util.sheet_titles(sh_id):
         return SHEET
     sheets().spreadsheets().batchUpdate(
@@ -73,12 +77,12 @@ def ensure_sheet() -> str:
     return SHEET
 
 
-def _rows() -> list[list[str]]:
+def _rows(tutor: str = "") -> list[list[str]]:
     try:
-        ensure_sheet()
+        ensure_sheet(tutor)
     except Exception as e:  # noqa: BLE001
         log(f"Не смог подготовить лист «{SHEET}»: {e}")
-    return sheets_util.get_values(workspaces.spreadsheet(), f"'{SHEET}'!A1:I")
+    return sheets_util.get_values(sheet_for(tutor), f"'{SHEET}'!A1:I")
 
 
 def _rows_all() -> list[list[str]]:
@@ -91,7 +95,7 @@ def _rows_all() -> list[list[str]]:
     seen_sh: set[str] = set()
     # главная таблица
     try:
-        main_id = workspaces.load_config()["sheets"]["history"]
+        main_id = workspaces.spreadsheet_for("")
         for row in sheets_util.get_values(main_id, f"'{SHEET}'!A1:I"):
             out.append((main_id, row))
         seen_sh.add(main_id)
@@ -170,7 +174,7 @@ def _next_id(tutor: str = "") -> str:
     """Следующий ID расписания: M1/V1 для личных таблиц, число для общей."""
     letter = id_letter(tutor)
     mx = 0
-    for n, row in enumerate(_rows_for(tutor) if tutor else _rows(), start=1):
+    for n, row in enumerate(_rows_for(tutor), start=1):
         if n == 1 or not row:
             continue
         raw = str(row[0]).strip()
@@ -186,10 +190,10 @@ CANCEL_SHEET = "Отмены"
 CANCEL_COLS = ["ID", "Репетитор", "Ученик", "Дата", "Время"]
 
 
-def ensure_cancel_sheet(sh_id: str = "") -> str:
+def ensure_cancel_sheet(sh_id: str = "", tutor: str = "") -> str:
     from sheets_util import sheets
     if not sh_id:
-        sh_id = workspaces.spreadsheet()
+        sh_id = sheet_for(tutor)
     if CANCEL_SHEET in sheets_util.sheet_titles(sh_id):
         return CANCEL_SHEET
     sheets().spreadsheets().batchUpdate(
@@ -203,7 +207,7 @@ def ensure_cancel_sheet(sh_id: str = "") -> str:
 
 def _cancel_rows(tutor: str = "") -> list[list[str]]:
     """Отмены из таблицы репетитора (или текущей)."""
-    sh_id = sheet_for(tutor) if tutor else workspaces.spreadsheet()
+    sh_id = sheet_for(tutor)
     return sheets_util.get_values(sh_id, f"'{CANCEL_SHEET}'!A1:E")
 
 
@@ -229,7 +233,7 @@ def cancels_for(tutor: str) -> list[dict]:
 
 def add_cancel(tutor: str, student: str, day: dt.date, time_str: str) -> int:
     sh_id = sheet_for(tutor)
-    ensure_cancel_sheet(sh_id)
+    ensure_cancel_sheet(sh_id, tutor)
     rows = _cancel_rows(tutor)
     last = 1
     letter = id_letter(tutor)
@@ -331,8 +335,8 @@ def update_entry(entry_id, day: str, time_str: str,
                  tutor: str = "", sh_id: str = "") -> bool:
     """Меняет день и время записи по ID (в таблице этого репетитора)."""
     if not sh_id:
-        sh_id = sheet_for(tutor) if tutor else workspaces.spreadsheet()
-    rows = _rows_for(tutor) if tutor else _rows()
+        sh_id = sheet_for(tutor)
+    rows = _rows_for(tutor)
     for n, row in enumerate(rows, start=1):
         if n == 1 or not row:
             continue
@@ -413,8 +417,8 @@ def update_last_date(entry_id, day: dt.date, tutor: str = "",
                      sh_id: str = "") -> None:
     """Записать «последнюю дату» занятия в таблицу его репетитора."""
     if not sh_id:
-        sh_id = sheet_for(tutor) if tutor else workspaces.spreadsheet()
-    rows = _rows_for(tutor) if tutor else _rows()
+        sh_id = sheet_for(tutor)
+    rows = _rows_for(tutor)
     for n, row in enumerate(rows, start=1):
         if n == 1 or not row:
             continue
@@ -427,8 +431,8 @@ def update_last_date(entry_id, day: dt.date, tutor: str = "",
 def delete_entry(entry_id, tutor: str = "", sh_id: str = "") -> bool:
     """Удалить запись расписания (ищет в таблице репетитора)."""
     if not sh_id:
-        sh_id = sheet_for(tutor) if tutor else workspaces.spreadsheet()
-    rows = _rows_for(tutor) if tutor else _rows()
+        sh_id = sheet_for(tutor)
+    rows = _rows_for(tutor)
     for n, row in enumerate(rows, start=1):
         if n == 1 or not row:
             continue
