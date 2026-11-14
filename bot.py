@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import datetime as dt
 import os
+from types import SimpleNamespace
 import re
 import html
 import sys
