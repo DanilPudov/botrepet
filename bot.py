@@ -1625,7 +1625,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("pay:"):
         lid = data.split(":", 1)[1]
         try:
-            checks_writer.set_lesson_paid(lid, True)
+            checks_writer.set_lesson_paid(lid, True, title=_sheet_of(lid))
         except Exception as e:  # noqa: BLE001
             await q.answer(f"Ошибка: {e}", show_alert=True)
             return
@@ -1636,7 +1636,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("unpay:"):
         lid = data.split(":", 1)[1]
         try:
-            checks_writer.set_lesson_paid(lid, False)
+            checks_writer.set_lesson_paid(lid, False, title=_sheet_of(lid))
         except Exception as e:  # noqa: BLE001
             await q.answer(f"Ошибка: {e}", show_alert=True)
             return
@@ -1776,8 +1776,16 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("mdel:yes:"):
         await q.answer()
         lid = data.split(":", 2)[2]
+        _sheet = ""
         try:
-            ok = checks_writer.delete_lesson(lid)
+            for _x in checks_writer.read_lessons():
+                if str(_x.get("id") or "") == lid:
+                    _sheet = _x.get("лист") or ""
+                    break
+        except Exception:  # noqa: BLE001
+            _sheet = ""
+        try:
+            ok = checks_writer.delete_lesson(lid, title=_sheet or None)
         except Exception as e:  # noqa: BLE001
             log(f"Ошибка удаления записи: {e}")
             await q.edit_message_text(f"❌ Не удалось удалить: {e}",
@@ -2316,16 +2324,30 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "del:yes":
         await q.answer()
         p = get_pending(user.id) or {}
+        _tut = p.get("репетитор") or name_by_id(user.id) or ""
+        _ok = False
         if p.get("ученик"):
-            students_module.delete_student(p.get("репетитор") or name_by_id(user.id) or "",
-                                           p["ученик"])
-            log_action(user.id, "удалил ученика",
-                       f"{p.get('ученик','')} "
-                       f"({p.get('репетитор') or name_by_id(user.id) or ''})")
+            try:
+                _ok = students_module.delete_student(
+                    _tut, p["ученик"],
+                    where_row=p.get("row"),
+                    match_parent=p.get("родитель") or None)
+            except TypeError:
+                _ok = students_module.delete_student(_tut, p["ученик"])
+            if _ok:
+                log_action(user.id, "удалил ученика",
+                           f"{p.get('ученик','')} ({_tut})")
         set_pending(user.id, None)
         await show_main(update, context, edit=True)
-        await _send(update, "🗑 Ученик удалён.",
-                    reply_markup=kb([[("🏠 На главный экран", "menu")]]))
+        if _ok:
+            await _send(update, "🗑 Ученик удалён.",
+                        reply_markup=kb([[("🏠 На главный экран", "menu")]]))
+        else:
+            await _send(update,
+                        "⚠️ Не смог удалить: у репетитора несколько учеников "
+                        "с таким именем. Откройте нужного и удалите из его карточки.",
+                        reply_markup=kb([[("👥 Мои ученики", "students")],
+                                         [("🏠 На главный экран", "menu")]]))
         return
 
     if data == "del:no":
@@ -2905,9 +2927,46 @@ def with_home(markup):
     return InlineKeyboardMarkup(rows)
 
 
+LIMIT_TEXT = 3500          # Telegram режет на 4096, берём с запасом
+
+
+def _split_long(text: str, limit: int = LIMIT_TEXT) -> list[str]:
+    """Разбить длинный текст на части по строкам (лимит Telegram 4096)."""
+    if len(text) <= limit:
+        return [text]
+    parts, cur = [], ""
+    for line in text.split("\n"):
+        if len(cur) + len(line) + 1 > limit:
+            parts.append(cur)
+            cur = ""
+        cur += line + "\n"
+    if cur:
+        parts.append(cur)
+    return parts or [text]
+
+
 async def _say(update: Update, text: str, reply_markup=None,
                parse_mode: str | None = None) -> None:
-    """Отправить шаг диалога: отредактировать сообщение с кнопкой или ответить текстом."""
+    """Отправить шаг диалога: отредактировать сообщение с кнопкой или ответить текстом.
+
+    Длинный текст режется на части: Telegram не принимает >4096 символов,
+    а у активного репетитора список занятий легко перерастает лимит.
+    """
+    parts = _split_long(text)
+    if len(parts) > 1:
+        # первая часть — в текущее сообщение, остальные — новыми
+        await _say_one(update, parts[0], reply_markup=None, parse_mode=parse_mode)
+        for i, part in enumerate(parts[1:], start=2):
+            last = i == len(parts)
+            await _send(update, part, parse_mode=parse_mode,
+                        reply_markup=with_home(reply_markup) if last else None)
+        return
+    await _say_one(update, text, reply_markup=reply_markup, parse_mode=parse_mode)
+
+
+async def _say_one(update: Update, text: str, reply_markup=None,
+                   parse_mode: str | None = None) -> None:
+    """Отправить один (уже подходящий по длине) экран."""
     if update.callback_query is not None:
         try:
             await update.callback_query.edit_message_text(
@@ -3634,7 +3693,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                        "сумма": str(amt), "комментарий": x["комментарий"],
                        "первое": x["первое"], "как_прошло": x["как_прошло"],
                        "будут": x["будут"], "комиссия": x["комиссия"]}
-                checks_writer.update_lesson(lid, rec)
+                checks_writer.update_lesson(lid, rec, title=x.get("лист"))
                 log_action(user.id, "изменил сумму",
                            f"{x['репетитор']} — {x['ученик']} "
                            f"→ {amt} ₽")
@@ -3920,8 +3979,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await ask_time(update, context, p)
         return
 
-    # --- время текстом
-    if step == "время_текст":
+    # --- время текстом (шаг «время» тоже принимает текст: экран сам просит)
+    if step in ("время", "время_текст"):
         t = parse_time(text)
         if t is None:
             await _send(update, 
@@ -4372,17 +4431,26 @@ async def send_reminder(context: ContextTypes.DEFAULT_TYPE):
             log(f"Напоминание {t.get('name')} не доставлено: {e}")
 
 
-def _update_entry_time(entry_id: int, time_str: str) -> None:
-    from sheets_util import get_values, update_values
-    cfg = load_config()
-    sh_id = cfg["sheets"]["history"]
-    rows = get_values(sh_id, "'Расписание'!A1:I")
-    for n, row in enumerate(rows, start=1):
-        if n == 1 or not row:
-            continue
-        if str(row[0]).strip() == str(entry_id):
-            update_values(sh_id, f"'Расписание'!F{n}", [[time_str]])
-            return
+def _sheet_of(lesson_id: str) -> str | None:
+    """Лист, где лежит занятие с этим ID (чтобы не тронуть чужую таблицу)."""
+    try:
+        for x in checks_writer.read_lessons():
+            if str(x.get("id") or "") == str(lesson_id):
+                return x.get("лист") or None
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
+def _update_entry_time(entry_id, time_str: str) -> bool:
+    """Перенести занятие по ID. Ищет во ВСЕХ таблицах (своя у Максима/Вики)."""
+    e = schedule_module.get_entry(entry_id)
+    if not e:
+        return False
+    ok = schedule_module.update_entry(
+        str(entry_id), str(e.get("дни", "")), time_str,
+        tutor=e.get("репетитор", ""), sh_id=e.get("sh_id", ""))
+    return bool(ok)
 
 
 async def send_lesson_reminder(context: ContextTypes.DEFAULT_TYPE):
@@ -4797,6 +4865,20 @@ async def _on_error(update, context) -> None:
             return
     if err is None:
         return
+    # Google недоступен (квота/сеть): раньше репетитор видел полную тишину
+    if any(t in text for t in ("429", "quota", "SSL", "timed out",
+                               "Connection", "502", "503", "504",
+                               "Service temporarily")):
+        try:
+            if getattr(update, "callback_query", None) is not None:
+                await update.callback_query.answer(
+                    "Google сейчас не отвечает. Попробуйте через минуту.",
+                    show_alert=True)
+            elif getattr(update, "effective_message", None) is not None:
+                await update.effective_message.reply_text(
+                    "⚠️ Google сейчас не отвечает. Попробуйте через минуту.")
+        except Exception:  # noqa: BLE001
+            pass
     try:
         user_id = getattr(update, "effective_user", None)
         who = user_id.id if user_id else "?"
