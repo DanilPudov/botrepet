@@ -4891,8 +4891,14 @@ def main():
 
     import hashlib as _hl
     try:
-        _src = (sheets_util.BASE_DIR / "bot.py").read_bytes()
-        _ver = _hl.sha1(_src).hexdigest()[:8]
+        _h = _hl.sha1()
+        for _name in sorted(("bot.py", "sheets_util.py", "checks_writer.py",
+                             "students.py", "schedule.py", "notes.py",
+                             "workspaces.py", "activity.py")):
+            _f = sheets_util.BASE_DIR / _name
+            if _f.exists():
+                _h.update(_f.read_bytes())
+        _ver = _h.hexdigest()[:8]
     except Exception:  # noqa: BLE001
         _ver = "?"
     log(f"Бот запущен. Сборка {_ver}. Режим доступа: {cfg.get('access')}")
