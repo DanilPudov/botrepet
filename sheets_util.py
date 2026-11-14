@@ -156,21 +156,43 @@ def sheets():
     return _sheets_client
 
 
+def _is_retryable(e: Exception) -> bool:
+    """Повторяем при квоте (429) и при сетевых/SSL-обрывах."""
+    msg = str(e)
+    low = msg.lower()
+    if "429" in msg or "quota" in low:
+        return True
+    for token in ("ssl", "record layer", "length_mismatch", "length mismatch",
+                  "connection reset", "connection aborted", "timed out",
+                  "timeout", "broken pipe", "remote end closed",
+                  "temporarily unavailable", "502", "503", "504"):
+        if token in low:
+            return True
+    return False
+
+
+def _drop_client() -> None:
+    """Сбросить клиент Google: следующая попытка создаст новое соединение."""
+    global _sheets_client
+    _sheets_client = None
+
+
 def _retry_429(func, *args, **kwargs):
-    """Повтор при превышении квоты Google (429) с паузой."""
+    """Повтор при квоте Google (429) и при обрывах соединения."""
     import time as _t
     last = None
-    # короткие паузы: синхронный sleep блокирует весь бот (event loop)
-    for attempt in range(3):
+    for attempt in range(4):
         try:
             return func(*args, **kwargs)
         except Exception as e:  # noqa: BLE001
-            msg = str(e)
-            if "429" not in msg and "quota" not in msg.lower():
+            if not _is_retryable(e):
                 raise
             last = e
-            if attempt < 2:
-                _t.sleep(0.4 * (attempt + 1))
+            # SSL/сеть: соединение испорчено — пересоздаём клиент
+            if "429" not in str(e) and "quota" not in str(e).lower():
+                _drop_client()
+            if attempt < 3:
+                _t.sleep(0.6 * (attempt + 1))
     raise last
 
 
