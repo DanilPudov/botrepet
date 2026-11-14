@@ -196,10 +196,13 @@ def name_by_id(user_id: int) -> str | None:
         return None
     for t in load_state().get("tutors", []):
         if int(t["id"]) == user_id:
-            return t.get("name")
+            nm = t.get("name")
+            _ws.set_active(nm or "")
+            return nm
     try:
         for tid, nm in _ws.WORKSPACE_TUTORS:
             if int(tid) == int(user_id):
+                _ws.set_active(nm)
                 return nm
     except Exception:  # noqa: BLE001
         pass
