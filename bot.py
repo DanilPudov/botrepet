@@ -3750,10 +3750,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if row:
             if step == "правка_link_student":
                 saved = students_module.update_student_row(
-                    int(row), student_link=link)
+                    int(row), tutor=tutor, student_link=link)
             else:
                 saved = students_module.update_student_row(
-                    int(row), parent_link=link)
+                    int(row), tutor=tutor, parent_link=link)
         if not saved:
             if step == "правка_link_student":
                 saved = students_module.update_student(
