@@ -4105,12 +4105,14 @@ async def show_past_week(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 "Занятий нет.")
     else:
         _total = paid_sum + no_sum + _unknown_sum
-        _payout = _ws.payout(_total, p.get("репетитор") or "")
+        _payout = _ws.payout(_total, tutor)
         text = (f"📆 <b>{_title}</b> ({monday:%d.%m}–{sunday:%d.%m})\n\n"
                 + "\n".join(parts)
                 + f"\n\n✅ подтверждено: <b>{paid_sum} ₽</b>"
                 + f"\n❌ не подтверждено: <b>{no_sum} ₽</b>"
-                + f"\n\n<b>Итого — {_payout} ₽</b> ({_ws.payout_note(p.get('репетитор') or '')})")
+                + f"\n\n<b>Итого — {_payout} ₽</b>"
+              + ("" if _ws.is_family(tutor) else
+                 f" ({_ws.payout_note(tutor)})"))
     rows.append([("⬅️ Назад", "nav:back")])
     await _say(update, text, parse_mode=ParseMode.HTML, reply_markup=kb(rows))
 
