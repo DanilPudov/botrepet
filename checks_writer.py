@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import datetime as dt
 
-from sheets_util import get_values, update_values, load_config, log, norm_name
+from sheets_util import get_values, update_values, load_config, log, norm_name, _exec
 
 KEY_COLS = (2, 3, 5)  # C репетитор, D ученик, F сумма (0-based)
 FIRST_DATA_ROW = 2
