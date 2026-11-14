@@ -1,0 +1,25 @@
+{
+  "telegram_token": "",
+  "service_account_key": "service_account.json",
+  "sheets": {
+    "recept": "1etq-fd68Q6exnU-pZCgAD-KGJI1-8j-V3qMm2TvKK6Q",
+    "recept_checks_sheet": "Чеки",
+    "recept_req_sheet": "Реквизиты репетиторов",
+    "history": "1cWd846Nf9pOA7pX3Lx5ZnRg0GKB01XSADuPqUrSIgCE",
+    "history_sheet": "История",
+    "students_sheet": "Ученики"
+  },
+  "write": {
+    "target": "history",
+    "history_sheet": "Занятия"
+  },
+  "owner_ids": [793935902, 7744930896],
+  "note_recipients": [793935902],
+  "access": "list",
+  "notification_chat_id": null,
+  "reminder": {
+    "enabled": true,
+    "weekday": 0,
+    "time": "19:00"
+  }
+}
