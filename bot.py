@@ -561,6 +561,16 @@ def _already_recorded(tutor: str, date_s: str, time_s: str,
     return False
 
 
+# Когда ботом последний раз пользовались (для фонового обновления кэша)
+_LAST_ACTIVITY: dict = {"ts": 0.0}
+
+
+def _touch_activity() -> None:
+    """Отметить активность: кэш обновляем только когда ботом пользуются."""
+    import time as _t
+    _LAST_ACTIVITY["ts"] = _t.time()
+
+
 def log_action(user_id: int, action: str, details: str = "") -> None:
     """Записать действие в журнал (кто, что, когда)."""
     try:
@@ -3211,6 +3221,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+    _touch_activity()
     try:
         await _maybe_send_note(context.bot, user.id)
     except Exception:  # noqa: BLE001
@@ -4607,8 +4618,16 @@ async def _warm_cache(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def refresh_cache_job(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Держать кэш тёплым: обновлять данные в фоне, чтобы бот отвечал мгновенно."""
+    """Обновить кэш в фоне — только если ботом недавно пользовались.
+
+    Google даёт 60 чтений в минуту на проект. Постоянное обновление
+    каждую минуту съедало квоту, и пользователи получали ошибку 429.
+    """
     import asyncio as _aio
+    import time as _t
+
+    if _t.time() - _LAST_ACTIVITY.get("ts", 0) > 600:
+        return          # 10 минут тишины — кэш не трогаем
 
     def _refresh() -> None:
         try:
@@ -4868,7 +4887,7 @@ def main():
         app.job_queue.run_repeating(check_suggestions_job, interval=3600, first=90)
         app.job_queue.run_once(_warm_cache, when=1)
         # кэш живёт 60 с — обновляем каждые 45 с, чтобы он не остывал
-        app.job_queue.run_repeating(refresh_cache_job, interval=45, first=50)
+        app.job_queue.run_repeating(refresh_cache_job, interval=180, first=120)
 
     import hashlib as _hl
     try:
