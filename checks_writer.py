@@ -1045,6 +1045,19 @@ def read_lessons(include_history: bool = False,
     except Exception as e:  # noqa: BLE001
         log(f"Не прочитал «Чеки»: {e}")
 
+    # личные таблицы репетиторов (Максим, Вика) — у каждого своя книга
+    try:
+        import workspaces as _ws
+        for _tutor, _sid in _ws.WORKSPACES.items():
+            try:
+                for x in _rows_from(_sid, _ws.WORKSPACE_LESSONS_SHEET):
+                    x["лист"] = f"Занятия ({_tutor})"
+                    lessons.append(x)
+            except Exception as e:  # noqa: BLE001
+                log(f"Не прочитал таблицу {_tutor}: {e}")
+    except Exception as e:  # noqa: BLE001
+        log(f"Личные таблицы не прочитаны: {e}")
+
     if include_history:
         hist_sheet = cfg["sheets"]["history_sheet"]
         if hist_sheet not in lesson_sheets:
