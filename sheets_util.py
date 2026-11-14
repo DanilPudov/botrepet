@@ -180,6 +180,34 @@ _VALUES_CACHE: dict = {}
 _VALUES_TTL = 60.0
 
 
+# Кэш списка листов книги: без него каждый экран запрашивал структуру
+# таблицы заново и упирался в квоту Google (60 чтений в минуту).
+_SHEETS_TITLES: dict[str, tuple[float, list[str]]] = {}
+_SHEETS_TTL = 300.0
+
+
+def sheet_titles(sh_id: str, refresh: bool = False) -> list[str]:
+    """Названия листов книги (кэш 5 минут)."""
+    import time as _t
+    now = _t.time()
+    if not refresh:
+        hit = _SHEETS_TITLES.get(sh_id)
+        if hit and now - hit[0] < _SHEETS_TTL:
+            return hit[1]
+    try:
+        meta = sheets().spreadsheets().get(spreadsheetId=sh_id).execute()
+        titles = [s["properties"]["title"] for s in meta.get("sheets", [])]
+    except Exception:
+        hit = _SHEETS_TITLES.get(sh_id)
+        return hit[1] if hit else []
+    _SHEETS_TITLES[sh_id] = (now, titles)
+    return titles
+
+
+def forget_sheet_titles(sh_id: str) -> None:
+    _SHEETS_TITLES.pop(sh_id, None)
+
+
 def invalidate_values_cache() -> None:
     _VALUES_CACHE.clear()
 
