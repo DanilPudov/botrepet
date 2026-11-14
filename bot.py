@@ -4525,7 +4525,9 @@ async def reschedule_reminders(context: ContextTypes.DEFAULT_TYPE):
         if not day:
             continue
         key = f"{entry['репетитор']}-{entry['id']}-{day:%Y%m%d}"
-        if reminded.get(key):
+        # старый формат ключа (без репетитора) — чтобы не слать повторно
+        old_key = f"{entry['id']}-{day:%Y%m%d}"
+        if reminded.get(key) or reminded.get(old_key):
             continue
         try:
             if jq.get_jobs_by_name(f"remind-{key}"):
