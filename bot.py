@@ -4607,6 +4607,10 @@ async def _warm_cache(context: ContextTypes.DEFAULT_TYPE) -> None:
         except Exception as e:  # noqa: BLE001
             log(f"ID в «Чеках» не проставлены: {e}")
         try:
+            checks_writer.ensure_personal_ids()
+        except Exception as e:  # noqa: BLE001
+            log(f"ID в личных таблицах не проставлены: {e}")
+        try:
             checks_writer.read_lessons(include_history=True)
             checks_writer.lesson_flags()
             students_module.students_of("Данил Пудов")
