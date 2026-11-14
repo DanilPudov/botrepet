@@ -123,6 +123,12 @@ def role_of(user_id: int) -> str | None:
     ids = {int(t["id"]): t for t in state.get("tutors", [])}
     if user_id in ids:
         return OWNER if ids[user_id].get("role") == "owner" else TUTOR
+    # Максим и Вика — доступ всегда, даже если state.json на сервере старый
+    try:
+        if any(int(tid) == int(user_id) for tid, _ in _ws.WORKSPACE_TUTORS):
+            return TUTOR
+    except Exception:  # noqa: BLE001
+        pass
     access = cfg.get("access", "ids")
     if access == "anyone":  # только для отладки, по умолчанию выключено
         return TUTOR
@@ -185,6 +191,12 @@ def name_by_id(user_id: int) -> str | None:
     for t in load_state().get("tutors", []):
         if int(t["id"]) == user_id:
             return t.get("name")
+    try:
+        for tid, nm in _ws.WORKSPACE_TUTORS:
+            if int(tid) == int(user_id):
+                return nm
+    except Exception:  # noqa: BLE001
+        pass
     return None
 
 
