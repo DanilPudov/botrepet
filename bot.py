@@ -1550,8 +1550,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data.startswith("view:"):
         await q.answer()
-        _view_target = data.split(":", 1)[1]
-        log_action(user.id, "переключился на репетитора", _view_target)
         arg = data.split(":", 1)[1]
         st = load_state()
         if arg == "me":
@@ -4427,7 +4425,7 @@ async def reschedule_reminders(context: ContextTypes.DEFAULT_TYPE):
         day = schedule_module.next_occurrence(entry)
         if not day:
             continue
-        key = f"{entry['id']}-{day:%Y%m%d}"
+        key = f"{entry['репетитор']}-{entry['id']}-{day:%Y%m%d}"
         if reminded.get(key):
             continue
         try:
