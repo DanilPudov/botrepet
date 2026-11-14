@@ -170,6 +170,21 @@ def _find_row(tutor: str, student: str) -> int | None:
     return found["row"] if found else None
 
 
+def _row_to_dict(row: list[str], row_num: int) -> dict:
+    """Строка листа -> словарь ученика (как в students_of)."""
+    return {
+        "ученик": _cell(row, 1),
+        "родитель": _cell(row, 2),
+        "тариф": _cell(row, 3),
+        "добавлен": _cell(row, 4),
+        "комментарий": _cell(row, 5),
+        "ссылка_ученика": _cell(row, 6),
+        "ссылка_родителя": _cell(row, 7),
+        "отправитель": _cell(row, 8),
+        "row": row_num,
+    }
+
+
 def update_student(tutor: str, student: str, *, new_name: str | None = None,
                    parent: str | None = None, rate: str | None = None,
                    comment: str | None = None,
@@ -197,7 +212,17 @@ def update_student(tutor: str, student: str, *, new_name: str | None = None,
         row = found["row"]
     cfg = load_config()
     sh_id = workspaces.spreadsheet_for(tutor)
-    cur = find_student(tutor, student) or {}
+    # ВАЖНО: при тёзках find_student по имени вернёт None и мы затрём
+    # остальные поля пустыми. Поэтому берём данные из ТОЙ ЖЕ строки.
+    cur = find_student(tutor, student, parent=match_parent)
+    if not cur or cur.get("row") != row:
+        cur = {}
+        try:
+            rows = _rows(tutor)
+            if 2 <= row <= len(rows):
+                cur = _row_to_dict(rows[row - 1], row)
+        except Exception:  # noqa: BLE001
+            pass
     values = [[
         tutor,
         new_name if new_name is not None else cur.get("ученик", ""),
@@ -258,9 +283,22 @@ def set_rate(tutor: str, student: str, rate: str) -> bool:
     return update_student(tutor, student, rate=str(rate))
 
 
-def delete_student(tutor: str, student: str) -> bool:
-    """Очищает строку ученика (A..I), остальные строки не сдвигаются."""
-    row = _find_row(tutor, student)
+def delete_student(tutor: str, student: str, where_row: int | None = None,
+                   match_parent: str | None = None) -> bool:
+    """Очищает строку ученика (A..I), остальные строки не сдвигаются.
+
+    where_row — точная строка из карточки (нужно при тёзках).
+    match_parent — родитель для различения одинаковых имён.
+    """
+    row = None
+    if where_row:
+        try:
+            row = int(where_row)
+        except (TypeError, ValueError):
+            row = None
+    if row is None:
+        found = find_student(tutor, student, parent=match_parent)
+        row = found["row"] if found else None
     if row is None:
         return False
     cfg = load_config()
