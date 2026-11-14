@@ -33,25 +33,23 @@ def sheet_title() -> str:
 
 
 def ensure_sheet() -> str:
-    """Создаёт лист «Ученики», если его нет."""
+    """Создаёт лист «Ученики» при отсутствии, иначе дотягивает шапку до I."""
     from sheets_util import sheets
-    cfg = load_config()
     sh_id = workspaces.spreadsheet()
     title = sheet_title()
-    meta = sheets().spreadsheets().get(spreadsheetId=sh_id).execute()
-    titles = [s["properties"]["title"] for s in meta.get("sheets", [])]
-    if title in titles:
-        # дотянуть шапку до последней колонки («Имя отправителя»)
-        cur = sheets_util.get_values(sh_id, f"'{title}'!{_HEADER_RANGE}")
-        if not cur or len(cur[0]) < len(COLUMNS):
-            sheets_util.update_values(
-                sh_id, f"'{title}'!{_HEADER_RANGE}", [COLUMNS])
+    if title not in sheets_util.sheet_titles(sh_id):
+        sheets().spreadsheets().batchUpdate(
+            spreadsheetId=sh_id,
+            body={"requests": [{"addSheet": {"properties": {"title": title}}}]}
+        ).execute()
+        sheets_util.update_values(sh_id, f"'{title}'!{_HEADER_RANGE}", [COLUMNS])
+        sheets_util.forget_sheet_titles(sh_id)
+        log(f"Создан лист «{title}»")
         return title
-    sheets().spreadsheets().batchUpdate(
-        spreadsheetId=sh_id,
-        body={"requests": [{"addSheet": {"properties": {"title": title}}}]}).execute()
-    sheets_util.update_values(sh_id, f"'{title}'!{_HEADER_RANGE}", [COLUMNS])
-    log(f"Создан лист «{title}» в «Истории»")
+    # шапка могла быть старой (A..H) — дотянуть до I
+    cur = sheets_util.get_values(sh_id, f"'{title}'!{_HEADER_RANGE}")
+    if not cur or len(cur[0]) < len(COLUMNS):
+        sheets_util.update_values(sh_id, f"'{title}'!{_HEADER_RANGE}", [COLUMNS])
     return title
 
 
