@@ -749,7 +749,8 @@ async def _process_schedule_queue(update, context, p) -> None:
                 if (weekday in schedule_module.parse_days(str(e.get("дни", "")))
                         and parse_time(str(e.get("время", ""))) == t
                         and norm_name(e.get("ученик", "")) == norm_name(student)):
-                    schedule_module.delete_entry(e["id"])
+                    schedule_module.delete_entry(
+                        e["id"], tutor, e.get("sh_id", ""))
                     p["removed"] = int(p.get("removed", 0)) + 1
                     break
             set_pending(user.id, p)
@@ -845,8 +846,9 @@ async def _apply_resolve(update, context, p, mode: str) -> None:
                                      st.get("тариф", ""))
         p["added"] = int(p.get("added", 0)) + 1
     elif mode == "forever":
-        if str(r.get("existing_id", "")).isdigit():
-            schedule_module.delete_entry(int(r["existing_id"]))
+        _old = str(r.get("existing_id", "")).strip()
+        if _old:
+            schedule_module.delete_entry(_old, tutor)
         schedule_module.add_entry(tutor, student, r.get("parent", "")
                                   or st.get("родитель", ""),
                                   schedule_module.DAY_NAMES[weekday], t,
@@ -1456,8 +1458,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parts = data.split(":")
         action, rid = parts[1], parts[2]
         date_s = parts[3] if len(parts) > 3 else ""
-        entries = {e["id"]: e for e in schedule_module.all_entries()}
-        entry = entries.get(int(rid)) if rid.isdigit() else None
+        entries = {str(e["id"]): e for e in schedule_module.all_entries()}
+        entry = entries.get(str(rid))
         if not entry:
             await q.answer("Запись расписания не найдена", show_alert=True)
             return
@@ -1481,8 +1483,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "первое": "нет", "как_прошло": "Отлично", "будут": "Да",
                     "комиссия": "", "оплачено": True,
                 })
-                schedule_module.update_last_date(entry["id"],
-                                                 dt.datetime.strptime(date_s, "%d.%m.%Y").date())
+                schedule_module.update_last_date(
+                    entry["id"],
+                    dt.datetime.strptime(date_s, "%d.%m.%Y").date(),
+                    tutor=entry.get("репетитор", ""),
+                    sh_id=entry.get("sh_id", ""))
                 log_system("записал занятие по расписанию",
                            f"{entry.get('репетитор','')} — "
                            f"{entry.get('ученик','')} ({date_s})")
@@ -1524,7 +1529,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 })
                 schedule_module.update_last_date(
                     entry["id"],
-                    dt.datetime.strptime(date_s, "%d.%m.%Y").date())
+                    dt.datetime.strptime(date_s, "%d.%m.%Y").date(),
+                    tutor=entry.get("репетитор", ""),
+                    sh_id=entry.get("sh_id", ""))
                 await q.edit_message_text(
                     f"✅ Занятие записано ({date_s}).\n"
                     "Оплата подтвердится при сверке с выпиской.")
@@ -2174,7 +2181,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 break
         if target is not None:
             if schedule_module.one_time_date(str(target.get("дни", ""))) is not None:
-                schedule_module.delete_entry(target["id"])
+                schedule_module.delete_entry(
+                    target["id"], tutor, target.get("sh_id", ""))
                 msg = (f"🗑 Разовое занятие удалено полностью: "
                        f"{schedule_module.DAY_NAMES[day.weekday()]} "
                        f"{day:%d.%m} {t} {student}.")
@@ -2244,8 +2252,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("sdel:"):
         await q.answer()
         eid = data.split(":", 1)[1]
-        if eid.isdigit():
-            schedule_module.delete_entry(int(eid))
+        _e = schedule_module.get_entry(eid)
+        schedule_module.delete_entry(eid, (_e or {}).get("репетитор", ""),
+                                    (_e or {}).get("sh_id", ""))
         text, buttons = await schedule_view(user.id, 7)
         buttons = buttons + [[("🏠 На главный экран", "menu")]]
         await q.edit_message_text(
@@ -2408,7 +2417,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("sch:open:"):
         await q.answer()
         rid = data.split(":")[2]
-        entry = schedule_module.get_entry(int(rid)) if rid.isdigit() else None
+        entry = schedule_module.get_entry(rid, name_by_id(user.id) or "")
         if not entry:
             await show_student_schedule(update, context)
             return
@@ -2432,7 +2441,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("sch:card:"):
         await q.answer()
         rid = data.split(":")[2]
-        entry = schedule_module.get_entry(int(rid)) if rid.isdigit() else None
+        entry = schedule_module.get_entry(rid, name_by_id(user.id) or "")
         if not entry:
             await q.answer("Занятие не найдено", show_alert=True)
             return
@@ -2443,8 +2452,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("sch:del:"):
         await q.answer()
         rid = data.split(":")[2]
-        if rid.isdigit():
-            schedule_module.delete_entry(int(rid))
+        _e = schedule_module.get_entry(rid, name_by_id(user.id) or "")
+        schedule_module.delete_entry(rid, (_e or {}).get("репетитор", ""),
+                                    (_e or {}).get("sh_id", ""))
         await show_student_schedule(update, context)
         return
 
@@ -3386,9 +3396,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         parse_mode=ParseMode.MARKDOWN)
             return
         rid = p.get("edit_id", "")
-        if str(rid).isdigit():
-            schedule_module.update_entry(int(rid),
-                                         schedule_module.DAY_NAMES[days[0]], t)
+        if str(rid).strip():
+            _tut = p.get("репетитор") or name_by_id(user.id) or ""
+            schedule_module.update_entry(str(rid),
+                                         schedule_module.DAY_NAMES[days[0]], t,
+                                         tutor=_tut)
         p["шаг"] = "расписание"
         set_pending(user.id, p)
         await _send(update, "✅ Изменено.", reply_markup=kb([[("⬅️ К расписанию", "sch:list")]]))
@@ -4610,6 +4622,10 @@ async def _warm_cache(context: ContextTypes.DEFAULT_TYPE) -> None:
             checks_writer.ensure_personal_ids()
         except Exception as e:  # noqa: BLE001
             log(f"ID в личных таблицах не проставлены: {e}")
+        try:
+            schedule_module.ensure_personal_ids()
+        except Exception as e:  # noqa: BLE001
+            log(f"ID расписания не проставлены: {e}")
         try:
             checks_writer.read_lessons(include_history=True)
             checks_writer.lesson_flags()
