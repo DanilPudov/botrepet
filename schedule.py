@@ -43,7 +43,10 @@ def ensure_sheet() -> str:
 
 
 def _rows() -> list[list[str]]:
-    cfg = load_config()
+    try:
+        ensure_sheet()
+    except Exception as e:  # noqa: BLE001
+        log(f"Не смог подготовить лист «{SHEET}»: {e}")
     return sheets_util.get_values(workspaces.spreadsheet(), f"'{SHEET}'!A1:I")
 
 
