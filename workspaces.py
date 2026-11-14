@@ -135,6 +135,18 @@ def active_tutor() -> str:
     return _ACTIVE.get() or ""
 
 
+def spreadsheet_for(tutor: str) -> str:
+    """Таблица для КОНКРЕТНОГО репетитора (без глобального состояния).
+
+    Максим/Вика — своя книга, Данил — главная «История»,
+    остальные — главная (их занятия лежат в «Чеки»).
+    """
+    sid = workspace_id(tutor) if tutor else None
+    if sid:
+        return sid
+    return load_config()["sheets"]["history"]
+
+
 def spreadsheet() -> str:
     """ID таблицы для текущего репетитора: своя, иначе главная."""
     t = active_tutor()
