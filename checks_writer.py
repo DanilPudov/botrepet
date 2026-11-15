@@ -88,6 +88,8 @@ def _cache_put(key, value):
 def invalidate_cache() -> None:
     """Сбросить кэш после записи в таблицу."""
     _READ_CACHE.clear()
+    _IDS_CACHE["ts"] = 0.0
+    _IDS_CACHE["ids"] = []
 
 
 def _target(tutor: str = "") -> tuple[str, str]:
@@ -848,8 +850,18 @@ def id_prefix() -> str:
     return f"{t.day}{t.month:02d}"
 
 
+_IDS_CACHE: dict = {"ts": 0.0, "ids": []}
+_IDS_TTL = 60.0
+
+
 def _ids_from_all() -> list[str]:
-    """Все ID из листов занятий + «Чеки Репет» (пакетное чтение)."""
+    """Все ID из листов занятий + «Чеки Репет» (пакетное чтение).
+
+    Результат кэшируется: кнопка «подтвердить» вызывает это дважды подряд,
+    и без кэша каждое нажатие делало лишнее полное чтение всех таблиц.
+    """
+    if _IDS_CACHE["ids"] and _time.time() - _IDS_CACHE["ts"] < _IDS_TTL:
+        return _IDS_CACHE["ids"]
     from sheets_util import get_values_batch
     cfg = load_config()
     hist_id = cfg["sheets"]["history"]
@@ -900,6 +912,8 @@ def _ids_from_all() -> list[str]:
                 log(f"ID: не прочитал {_tutor}: {e}")
     except Exception as e:  # noqa: BLE001
         log(f"ID: личные таблицы не прочитаны: {e}")
+    _IDS_CACHE["ts"] = _time.time()
+    _IDS_CACHE["ids"] = out
     return out
 
 
