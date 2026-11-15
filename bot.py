@@ -1484,6 +1484,15 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "первое": "нет", "как_прошло": "Отлично", "будут": "Да",
                     "комиссия": "", "оплачено": True,
                 })
+            except Exception as e:  # noqa: BLE001
+                log(f"Ошибка записи из напоминания: {e}")
+                await q.edit_message_text(
+                    f"❌ Не удалось записать: {e}\n\n"
+                    "Попробуйте ещё раз через минуту.")
+                return
+            # Запись уже в таблице: вспомогательные шаги не должны
+            # превращать успех в «не удалось».
+            try:
                 schedule_module.update_last_date(
                     entry["id"],
                     dt.datetime.strptime(date_s, "%d.%m.%Y").date(),
@@ -1495,18 +1504,17 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 log_action(user.id, "подтвердил оплату",
                            f"{entry.get('репетитор','')} — {entry.get('ученик','')} "
                            f"{entry.get('цена','')} ₽ ({date_s})")
-                await q.edit_message_text(
-                    f"✅ Оплата подтверждена, запись добавлена ({date_s}).")
-                try:
-                    import asyncio as _asyncio
-                    await _asyncio.sleep(1)
-                    if q.message is not None:
-                        await q.message.delete()
-                except Exception:  # noqa: BLE001
-                    pass
             except Exception as e:  # noqa: BLE001
-                log(f"Ошибка записи из напоминания: {e}")
-                await q.edit_message_text(f"❌ Не удалось записать: {e}")
+                log(f"Запись прошла, но доп. шаг упал: {e}")
+            await q.edit_message_text(
+                f"✅ Оплата подтверждена, запись добавлена ({date_s}).")
+            try:
+                import asyncio as _asyncio
+                await _asyncio.sleep(1)
+                if q.message is not None:
+                    await q.message.delete()
+            except Exception:  # noqa: BLE001
+                pass
             return
         if action == "was":
             if role_of(user.id) == OWNER:
