@@ -14,7 +14,7 @@ import datetime as dt
 
 import workspaces
 import sheets_util
-from sheets_util import load_config, log, norm_name
+from sheets_util import load_config, log, norm_name, names_match
 
 SHEET = "Расписание"
 COLUMNS = ["ID", "Репетитор", "Ученик", "Родитель", "Дни", "Время",
