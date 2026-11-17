@@ -452,7 +452,8 @@ async def begin_new_students(update: Update, context: ContextTypes.DEFAULT_TYPE)
     rows = []
     for i, s in enumerate(roster):
         label = s["ученик"] + (f" ({s['родитель']})" if s.get("родитель") else "")
-        rows.append([(label[:40], f"stu:{i}")])
+        key = s.get("id") or str(i)
+        rows.append([(label[:40], f"stu:{key}")])
     rows.append([("➕ Добавить ученика", "add_student"), ("Отменить", "cancel")])
     await _say(update, f"📅 {p.get('дата', '')}\nЗа кого занятие?",
                reply_markup=kb(rows))
@@ -801,7 +802,7 @@ async def _process_schedule_queue(update, context, p) -> None:
                 set_pending(user.id, p)
             return
 
-        st = students_module.find_student(tutor, student) or {}
+        st = students_module.find_student(tutor, student, parent=parent) or {}
         log_action(user.id, "добавил в расписание",
                    f"{student} {t or ''}".strip())
         schedule_module.add_entry(tutor, student, parent or st.get("родитель", ""),
@@ -831,7 +832,8 @@ async def _apply_resolve(update, context, p, mode: str) -> None:
     weekday = int(r.get("weekday", 0))
     t = r.get("time", "")
     student = r.get("student", "")
-    st = students_module.find_student(tutor, student) or {}
+    st = students_module.find_student(tutor, student,
+                                      parent=r.get("parent", "")) or {}
     if mode == "par":
         parent = r.get("parent_chosen", "")
         p.setdefault("queue", []).insert(0, f"{t} {student} ({parent})")
@@ -1162,7 +1164,8 @@ async def manual_show_students(update: Update, context: ContextTypes.DEFAULT_TYP
     rows = []
     for i, s in enumerate(roster):
         label = s["ученик"] + (f" ({s['родитель']})" if s.get("родитель") else "")
-        rows.append([(label[:40], f"stu:{i}")])
+        key = s.get("id") or str(i)
+        rows.append([(label[:40], f"stu:{key}")])
     rows.append([("➕ Добавить ученика", "add_student"), ("Отменить", "cancel")])
     await _say(update,
                f"✏️ Запись от имени *{canon}* (чужой ID)\n\nЗа кого занятие?",
@@ -2393,7 +2396,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         p = get_pending(user.id) or {}
         val = data.split(":")[2]
         if val != "skip":
-            students_module.set_rate(tutor_of(p, user), p.get("ученик", ""), val)
+            students_module.set_rate(tutor_of(p, user), p.get("ученик", ""), val,
+                                  parent=p.get("родитель") or None,
+                                  where_row=p.get("row"))
             p["тариф"] = val
         p["шаг"] = "н_коммент"
         set_pending(user.id, p)
@@ -2527,18 +2532,25 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # --- выбор ученика из списка
     if data.startswith("stu:"):
         await q.answer()
-        idx = int(data.split(":", 1)[1])
+        key = data.split(":", 1)[1]
         tutor = p.get("репетитор") or name_by_id(user.id) or ""
         roster = students_module.students_of(tutor) if tutor else []
-        if idx >= len(roster):
+        st = next((s for s in roster if s.get("id") == key), None)
+        if st is None:
+            try:
+                idx = int(key)
+                st = roster[idx] if idx < len(roster) else None
+            except (TypeError, ValueError):
+                st = None
+        if st is None:
             await q.edit_message_text(
                 "Список устарел, начните заново.",
                 reply_markup=kb([[("Записать занятие", "new")], [("Меню", "menu")]]))
             return
-        st = roster[idx]
         p["ученик"] = st["ученик"]
         p["родитель"] = st.get("родитель", "")
         p["тариф"] = st.get("тариф", "")
+        p["ученик_id"] = st.get("id", "")
         if p.get("дата"):
             await ask_amount(update, context, p)
         else:
@@ -2575,7 +2587,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # цену запоминаем за учеником (если её ещё не было)
         if not p.get("тариф") and p.get("ученик") and p.get("репетитор"):
             try:
-                students_module.set_rate(p["репетитор"], p["ученик"], p["сумма"])
+                students_module.set_rate(p["репетитор"], p["ученик"], p["сумма"],
+                                  parent=p.get("родитель") or None,
+                                  where_row=p.get("row"))
                 p["тариф"] = p["сумма"]
             except Exception as e:  # noqa: BLE001
                 log(f"Не смог сохранить цену ученика: {e}")
@@ -3433,7 +3447,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not days or not t:
                 continue
             tutor = p.get("репетитор") or name_by_id(user.id) or ""
-            st = students_module.find_student(tutor, p.get("ученик", "")) or {}
+            st = students_module.find_student(
+                tutor, p.get("ученик", ""),
+                parent=p.get("родитель") or "") or {}
             schedule_module.add_entry(
                 tutor, p.get("ученик", ""), (st.get("родитель") or ""),
                 schedule_module.DAY_NAMES[days[0]], t, st.get("тариф") or "")
@@ -3485,7 +3501,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         p["сумма"] = str(amt)
         if p.get("ученик") and p.get("репетитор"):
             try:
-                students_module.set_rate(p["репетитор"], p["ученик"], str(amt))
+                students_module.set_rate(p["репетитор"], p["ученик"], str(amt),
+                                  parent=p.get("родитель") or None,
+                                  where_row=p.get("row"))
             except Exception as e:  # noqa: BLE001
                 log(f"Не смог сохранить цену: {e}")
         await ask_time(update, context, p)
@@ -3597,7 +3615,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             student = who[:who.index("(")].strip()
             parent = who[who.index("(") + 1:-1].strip()
         tutor = p.get("репетитор") or name_by_id(user.id) or ""
-        st = students_module.find_student(tutor, student) or {}
+        st = students_module.find_student(tutor, student, parent=parent) or {}
         # зачёркиваем чужое занятие в это же время, если есть
         for e in schedule_module.entries_of(tutor):
             single = schedule_module.one_time_date(str(e.get("дни", "")))
@@ -3650,8 +3668,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not t:
             await _send(update, "Не понял время. Пример: 12.11 18:00")
             return
-        st = students_module.find_student(p.get("репетитор", ""),
-                                          p.get("ученик", "")) or {}
+        st = students_module.find_student(
+            p.get("репетитор", ""), p.get("ученик", ""),
+            parent=p.get("родитель") or "") or {}
         eid = schedule_module.add_one_time(
             p.get("репетитор", ""), p.get("ученик", ""),
             st.get("родитель", ""), d, t,
@@ -3717,7 +3736,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if amt is None:
             await _send(update, "Напишите число, например 1700.")
             return
-        students_module.set_rate(tutor_of(p, user), p.get("ученик", ""), str(amt))
+        students_module.set_rate(tutor_of(p, user), p.get("ученик", ""), str(amt),
+                                  parent=p.get("родитель") or None,
+                                  where_row=p.get("row"))
         p.update({"тариф": str(amt), "шаг": "н_коммент"})
         set_pending(user.id, p)
         await _send(update, "Цена сохранена.\n\nКомментарий: класс, предмет, "
