@@ -1,12 +1,18 @@
 """
 Список учеников репетиторов: лист «Ученики» в таблице «История».
 
-Колонки (A..I):
+Колонки (A..J):
   A Репетитор | B Ученик | C Родитель | D Тариф (₽/занятие) | E Когда добавлен
   F Комментарий | G Ссылка ученика | H Ссылка родителя | I Имя отправителя
+  J ID ученика (стабильный, уникальный в книге репетитора)
 
 В колонке I может быть несколько имён через запятую — по ним ищется,
 кто именно перевёл деньги (см. senders_of / find_by_sender).
+
+ID ученика (колонка J) — надёжный идентификатор: даже если у репетитора
+два ученика с одинаковым именем (например, София (Жанна) и София (Мария)),
+все операции идут по ID, а не по имени. Старым строкам без ID он
+назначается автоматически при первом чтении.
 
 Каждый репетитор видит и пополняет только своих. Лист создаётся автоматически.
 """
@@ -20,11 +26,13 @@ from sheets_util import load_config, log, names_match, norm_name
 
 COLUMNS = ["Репетитор", "Ученик", "Родитель", "Тариф (занятие)",
            "Когда добавлен", "Комментарий",
-           "Ссылка ученика", "Ссылка родителя", "Имя отправителя"]
+           "Ссылка ученика", "Ссылка родителя", "Имя отправителя",
+           "ID ученика"]
 
 # Индексы колонок в строке листа
 I_SENDER = 8          # I — Имя отправителя
-_LAST_COL = "I"       # последняя колонка листа
+I_STUDENT_ID = 9      # J — стабильный ID ученика
+_LAST_COL = "J"       # последняя колонка листа
 _HEADER_RANGE = f"A1:{_LAST_COL}1"
 
 
@@ -110,10 +118,135 @@ def students_of(tutor: str) -> list[dict]:
             "ссылка_ученика": row[6] if len(row) > 6 else "",
             "ссылка_родителя": row[7] if len(row) > 7 else "",
             "отправитель": _cell(row, I_SENDER),
+            "id": _cell(row, I_STUDENT_ID),
             "row": n,
         })
     _STUD_CACHE[cache_key] = (_t.time(), out)
     return out
+
+
+def student_id_prefix(tutor: str) -> str:
+    """Префикс ID ученика, уникальный для репетитора.
+
+    Данил → D, Максим → M, Вика → V, остальные → первая буква имени
+    плюс часть telegram-id. Это исключает совпадение ID между разными
+    репетиторами даже при одинаковых порядковых номерах.
+    """
+    import re as _re
+    name = workspaces.canon_tutor(tutor) or str(tutor or "")
+    first = ""
+    for ch in name:
+        if ch.isalpha():
+            first = ch.upper()
+            break
+    # кириллическая буква المح might не подойти для ID — translit
+    trans = {"Д": "D", "М": "M", "В": "V", "И": "I", "Р": "R",
+             "Б": "B", "Н": "N", "А": "A", "В": "V", "С": "S", "Т": "T"}
+    letter = trans.get(first, first)
+    if not _re.match(r"^[A-Z]$", letter):
+        letter = "T"
+    # для не-семьи добавляем хвост telegram-id, чтобы префиксы не бились
+    if name in ("Данил Пудов", "Максим Пудов", "Виктория Пудова"):
+        return letter
+    tail = ""
+    try:
+        import sheets_util as _su
+        for t in _su.load_state().get("tutors", []):
+            if norm_name(t.get("name", "")) == norm_name(name):
+                tail = str(t.get("id", ""))[-3:]
+                break
+    except Exception:  # noqa: BLE001
+        pass
+    return letter + (tail or "X")
+
+
+def renumber_student_ids(tutor: str = "") -> int:
+    """Перенумеровать ID всех учеников листа. Возвращает число строк.
+
+    Префикс берётся по репетитору из колонки A КАЖДОЙ строки, а не из
+    аргумента: в общей книге лежат ученики всех репетиторов, и раньше
+    из-за этого ID получали чужой префикс и могли совпасть.
+
+    Нумерация внутри префикса идёт подряд, поэтому ID уникальны в книге.
+    Запись — одним вызовом на весь диапазон (экономим квоту Google).
+    """
+    sh_id = workspaces.spreadsheet_for(tutor)
+    try:
+        rows = _rows(tutor)
+    except Exception as e:  # noqa: BLE001
+        log(f"Не смог перенумеровать ID учеников: {e}")
+        return 0
+    if len(rows) < 2:
+        return 0
+    data = [(n, r) for n, r in enumerate(rows, start=1)
+            if n > 1 and any(str(x).strip() for x in r)]
+    if not data:
+        return 0
+    counters: dict[str, int] = {}
+    new_ids: list[str] = []
+    for _n, r in data:
+        row_tutor = str(_cell(r, 0)).strip() or tutor
+        prefix = student_id_prefix(row_tutor)
+        counters[prefix] = counters.get(prefix, 0) + 1
+        new_ids.append(f"{prefix}{counters[prefix]}")
+    if len(set(new_ids)) != len(new_ids):
+        log("УЧЕНИКИ: ID не уникальны — перенумерация отменена")
+        return 0
+    first, last = data[0][0], data[-1][0]
+    if last - first + 1 == len(data):
+        sheets_util.update_values(
+            sh_id, f"'{sheet_title()}'!J{first}:J{last}",
+            [[x] for x in new_ids])
+    else:
+        for (n, _r), nid in zip(data, new_ids):
+            sheets_util.update_values(
+                sh_id, f"'{sheet_title()}'!J{n}", [[nid]])
+    invalidate_students_cache()
+    log(f"УЧЕНИКИ: ID перенумерованы ({len(new_ids)}) в {sh_id}")
+    return len(new_ids)
+
+
+def ensure_student_ids(tutor: str = "") -> int:
+    """Назначить стабильные ID всем ученикам без ID. Возвращает число новых.
+
+    Старым строкам (записанным до появления колонки J) ID ставится
+    один раз. Префикс определяется по репетитору из колонки A строки.
+    """
+    sh_id = workspaces.spreadsheet_for(tutor)
+    try:
+        rows = _rows(tutor)
+    except Exception as e:  # noqa: BLE001
+        log(f"Не смог назначить ID учеников: {e}")
+        return 0
+    if not rows:
+        return 0
+    # сколько уже занято под каждый префикс
+    counters: dict[str, int] = {}
+    for r in rows[1:]:
+        sid = str(_cell(r, I_STUDENT_ID)).strip()
+        if not sid:
+            continue
+        for pfx_len in range(1, len(sid) + 1):
+            if sid[pfx_len:].isdigit():
+                pfx = sid[:pfx_len]
+                counters[pfx] = max(counters.get(pfx, 0), int(sid[pfx_len:]))
+                break
+    written = 0
+    for n, r in enumerate(rows, start=1):
+        if n == 1 or not any(str(x).strip() for x in r):
+            continue
+        if str(_cell(r, I_STUDENT_ID)).strip():
+            continue
+        row_tutor = str(_cell(r, 0)).strip() or tutor
+        prefix = student_id_prefix(row_tutor)
+        counters[prefix] = counters.get(prefix, 0) + 1
+        sheets_util.update_values(
+            sh_id, f"'{sheet_title()}'!J{n}", [[f"{prefix}{counters[prefix]}"]])
+        written += 1
+    if written:
+        invalidate_students_cache()
+        log(f"УЧЕНИКИ: назначено ID {written} в таблице {sh_id}")
+    return written
 
 
 def add_student(tutor: str, student: str, parent: str = "", rate: str = "",
@@ -129,10 +262,27 @@ def add_student(tutor: str, student: str, parent: str = "", rate: str = "",
         if any(str(x).strip() for x in row):
             last = n
     row_num = last + 1
+    prefix = student_id_prefix(tutor)
+    used = {s.get("id") for s in students_of(tutor) if s.get("id")}
+    mx = 0
+    for u in used:
+        u = str(u)
+        tail = u[len(prefix):] if u.startswith(prefix) else ""
+        if tail.isdigit():
+            mx = max(mx, int(tail))
+        elif u.startswith("S") and u[1:].isdigit():
+            mx = max(mx, int(u[1:]))
+    new_id = ""
+    while True:
+        mx += 1
+        cand = f"{prefix}{mx}"
+        if cand not in used:
+            new_id = cand
+            break
     sheets_util.update_values(
         sh_id, f"'{sheet_title()}'!A{row_num}:{_LAST_COL}{row_num}",
         [[tutor, student, parent, rate, dt.date.today().strftime("%d.%m.%Y"),
-          comment, student_link, parent_link, sender]])
+          comment, student_link, parent_link, sender, new_id]])
     log(f"УЧЕНИК добавлен строка {row_num}: {tutor} — {student} ({parent})")
     invalidate_students_cache()
     return row_num
@@ -140,12 +290,18 @@ def add_student(tutor: str, student: str, parent: str = "", rate: str = "",
 
 def find_student(tutor: str, student: str,
                  parent: str | None = None) -> dict | None:
-    """Найти ученика. При одинаковых именах — различать по родителю.
+    """Найти ученика. Сначала по стабильному ID, затем по имени+родителю.
 
     Если имя совпало у нескольких учеников, а родитель не указан,
     возвращаем None: лучше попросить уточнить, чем записать не тому.
     """
     roster = students_of(tutor)
+    # Стабильный ID имеет приоритет: тёзки никогда не путаются.
+    want_id = str(student or "").strip()
+    if len(want_id) >= 2 and want_id[:1].isalpha():
+        by_id = [s for s in roster if s.get("id") == want_id]
+        if len(by_id) == 1:
+            return by_id[0]
     want = norm_name(student)
     exact = [s for s in roster if norm_name(s["ученик"]) == want]
     if not exact:
@@ -181,6 +337,7 @@ def _row_to_dict(row: list[str], row_num: int) -> dict:
         "ссылка_ученика": _cell(row, 6),
         "ссылка_родителя": _cell(row, 7),
         "отправитель": _cell(row, 8),
+        "id": _cell(row, 9),
         "row": row_num,
     }
 
@@ -235,6 +392,7 @@ def update_student(tutor: str, student: str, *, new_name: str | None = None,
         (parent_link if parent_link is not None
          else cur.get("ссылка_родителя", "")),
         sender if sender is not None else cur.get("отправитель", ""),
+        cur.get("id", ""),
     ]]
     sheets_util.update_values(
         sh_id, f"'{sheet_title()}'!A{row}:{_LAST_COL}{row}", values)
@@ -270,6 +428,7 @@ def update_student_row(row: int, tutor: str = "", **fields) -> bool:
         fields["student_link"] if fields.get("student_link") is not None else _cell(cur_row, 6),
         fields["parent_link"] if fields.get("parent_link") is not None else _cell(cur_row, 7),
         fields["sender"] if fields.get("sender") is not None else _cell(cur_row, 8),
+        _cell(cur_row, I_STUDENT_ID),
     ]]
     sheets_util.update_values(
         sh_id, f"'{sheet_title()}'!A{row}:{_LAST_COL}{row}", values)
@@ -278,9 +437,13 @@ def update_student_row(row: int, tutor: str = "", **fields) -> bool:
     return True
 
 
-def set_rate(tutor: str, student: str, rate: str) -> bool:
+def set_rate(tutor: str, student: str, rate: str,
+             parent: str | None = None,
+             where_row: int | None = None) -> bool:
+    """Сохранить цену. parent/where_row обязательны при тёзках."""
     invalidate_students_cache()
-    return update_student(tutor, student, rate=str(rate))
+    return update_student(tutor, student, rate=str(rate),
+                          match_parent=parent, where_row=where_row)
 
 
 def delete_student(tutor: str, student: str, where_row: int | None = None,
