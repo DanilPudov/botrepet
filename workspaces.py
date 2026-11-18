@@ -166,6 +166,42 @@ def is_family(tutor: str) -> bool:
     return is_full_pay(tutor)
 
 
+PERIOD_ANCHOR_DAY = 11   # период считаем с 11-го числа
+
+
+def _anchor_start(today) -> "dt.date":
+    """Начало текущего периода: ближайшее 11-е число не позже today."""
+    import datetime as _dt
+    if today.day >= PERIOD_ANCHOR_DAY:
+        return _dt.date(today.year, today.month, PERIOD_ANCHOR_DAY)
+    year, month = today.year, today.month - 1
+    if month == 0:
+        year, month = year - 1, 12
+    return _dt.date(year, month, PERIOD_ANCHOR_DAY)
+
+
+def period_bounds(tutor: str, today=None) -> tuple:
+    """Границы текущего периода (start, end) с учётом длины у репетитора.
+
+    Период начинается 11-го числа, длина — week_span(tutor).
+    Например 18.11 при 14 днях: 11.11 – 24.11.
+    """
+    import datetime as _dt
+    today = today or _dt.date.today()
+    start = _anchor_start(today)
+    return start, start + _dt.timedelta(days=week_span(tutor) - 1)
+
+
+def past_period_bounds(tutor: str, today=None) -> tuple:
+    """Границы прошедшего периода — ровно перед текущим."""
+    import datetime as _dt
+    today = today or _dt.date.today()
+    cur_start, _ = period_bounds(tutor, today)
+    end = cur_start - _dt.timedelta(days=1)
+    start = end - _dt.timedelta(days=week_span(tutor) - 1)
+    return start, end
+
+
 def week_span(tutor: str) -> int:
     """Сколько дней показывать в «Текущих»: семье — 7, остальным — 14."""
     return 7 if is_family(tutor) else 14
