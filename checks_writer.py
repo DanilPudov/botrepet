@@ -379,11 +379,30 @@ def _parse_day(value) -> dt.date | None:
     norm = (s.replace("/", ".").replace(",", ".")
              .replace(":", ".").replace(";", "."))
     parts = [p for p in norm.split(".") if p]
+    # «18.01», «6.11» — день и месяц без года (так писали руками).
+    # Берём текущий год, но если дата уехала бы в будущее — прошлый.
+    if len(parts) == 2 and all(p.strip().isdigit() for p in parts):
+        a, b = (int(p) for p in parts)
+        for day, month in ((a, b), (b, a)):
+            if 1 <= day <= 31 and 1 <= month <= 12:
+                year = dt.date.today().year
+                try:
+                    cand = dt.date(year, month, day)
+                except ValueError:
+                    continue
+                if (cand - dt.date.today()).days > 180:
+                    try:
+                        cand = dt.date(year - 1, month, day)
+                    except ValueError:
+                        pass
+                return cand
     if len(parts) == 3 and all(p.strip().isdigit() for p in parts):
         a, b, cc = (int(p) for p in parts)
         # год в конце: 26 -> 2026, 2026 -> 2026
         if cc < 100:
             cc += 2000
+        elif cc < 2000:
+            cc = 2000 + (cc % 100)      # «27.12.1015» → 2015, «0206» → 2006
         for day, month in ((a, b), (b, a)):
             if 1 <= day <= 31 and 1 <= month <= 12 and 2000 <= cc <= 2100:
                 try:
@@ -425,6 +444,32 @@ def _parse_sum(value) -> int:
         return 0
 
 
+def _day_from_id(lesson_id: str) -> dt.date | None:
+    """Дата из ID вида DDMM+счётчик (151117 -> 15.11).
+
+    Нужна, когда в строке пустая дата: занятие всё равно должно
+    попадать в бота, а не пропадать из списков.
+    """
+    lid = str(lesson_id or "").strip()
+    if len(lid) < 5 or not lid[:4].isdigit():
+        return None
+    day, month = int(lid[:2]), int(lid[2:4])
+    if not (1 <= day <= 31 and 1 <= month <= 12):
+        return None
+    today = dt.date.today()
+    for year in (today.year, today.year - 1):
+        try:
+            cand = dt.date(year, month, day)
+        except ValueError:
+            continue
+        if cand <= today:
+            return cand
+    try:
+        return dt.date(today.year, month, day)
+    except ValueError:
+        return None
+
+
 def _rows_from(sh_id: str, title: str,
                values: list | None = None) -> list[dict]:
     """Читает занятия по схеме:
@@ -445,6 +490,9 @@ def _rows_from(sh_id: str, title: str,
             continue
         tutor = norm_name(row[2]) if len(row) > 2 else ""
         d = _parse_day(row[1]) if len(row) > 1 else None
+        if d is None:
+            # пустая дата: ID хранит её в начале (151117 → 15.11)
+            d = _day_from_id(_cell(row, 11))
         if not tutor or d is None:
             continue
         student = _cell(row, 3)
