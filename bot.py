@@ -4135,8 +4135,8 @@ async def show_mine_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     user = update.effective_user
     tutor = name_by_id(user.id) or ""
     today = dt.date.today()
-    week_start = today - dt.timedelta(days=today.weekday())
-    week_end = week_start + dt.timedelta(days=_ws.week_span(tutor) - 1)
+    # период начинается 11-го числа, длина зависит от репетитора
+    week_start, week_end = _ws.period_bounds(tutor, today)
     try:
         all_lessons = checks_writer.read_lessons(with_checks=True)
     except Exception:  # noqa: BLE001
@@ -4212,8 +4212,7 @@ async def show_past_week(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     _span = _ws.week_span(tutor)
     _title = "Прошлая неделя" if _span == 7 else "Предыдущие 2 недели"
     today = dt.date.today()
-    monday = today - dt.timedelta(days=today.weekday() + _span)
-    sunday = monday + dt.timedelta(days=_span - 1)
+    monday, sunday = _ws.past_period_bounds(tutor, today)
     try:
         all_lessons = checks_writer.read_lessons(include_history=True)
     except Exception:  # noqa: BLE001
@@ -4273,8 +4272,7 @@ async def show_mine_records(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     user = update.effective_user
     tutor = name_by_id(user.id) or ""
     today = dt.date.today()
-    week_start = today - dt.timedelta(days=today.weekday())
-    week_end = week_start + dt.timedelta(days=_ws.week_span(tutor) - 1)
+    week_start, week_end = _ws.period_bounds(tutor, today)
     lessons = [x for x in checks_writer.read_lessons()
                if x["репетитор"] == tutor
                and week_start <= x["дата"] <= week_end]
@@ -4308,9 +4306,8 @@ async def mine_report(user_id: int) -> str:
     if not tutor:
         return "Сначала выберите своё имя (/start)."
     _today = dt.date.today()
-    start = _today - dt.timedelta(days=_today.weekday())
     _span = _ws.week_span(tutor)
-    end = start + dt.timedelta(days=_span - 1)
+    start, end = _ws.period_bounds(tutor, _today)
     _title = "Текущая неделя" if _span == 7 else "Текущие 2 недели"
     lessons = [x for x in checks_writer.read_lessons()
                if x["репетитор"] == tutor and start <= x["дата"] <= end]
