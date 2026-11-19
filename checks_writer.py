@@ -185,11 +185,48 @@ def tutor_id_prefix(tutor: str = "") -> str:
     return ""
 
 
-def next_lesson_id(title: str | None = None, tutor: str = "") -> str:
+def _fresh_series_ids(sh_id: str, title: str, personal: bool) -> list[str]:
+    """Читаем L без кэша, полностью, во всех книгах одной серии ID."""
+    from sheets_util import sheets
+    books = {sh_id: {title}}
+    if not personal:
+        cfg = load_config()["sheets"]
+        books.setdefault(cfg["recept"], set()).add(cfg["recept_checks_sheet"])
+        history = cfg["history"]
+        meta = _exec(sheets().spreadsheets().get(
+            spreadsheetId=history, fields="sheets(properties(title))"))
+        if "sheets" not in meta:
+            raise RuntimeError("Не удалось получить список листов с занятиями")
+        history_titles = books.setdefault(history, set())
+        for sheet in meta["sheets"]:
+            name = sheet["properties"]["title"]
+            if name in ("История", "Занятия") or name.startswith("История "):
+                history_titles.add(name)
+    ids = []
+    for book, titles in books.items():
+        if not titles:
+            continue
+        ranges = ["'" + name.replace("'", "''") + "'!L2:L" for name in sorted(titles)]
+        response = _exec(sheets().spreadsheets().values().batchGet(
+            spreadsheetId=book, ranges=ranges))
+        batches = response.get("valueRanges", [])
+        if len(batches) != len(ranges) or any(not batch.get("range") for batch in batches):
+            raise RuntimeError("Список ID занятий получен не полностью")
+        for batch in batches:
+            ids.extend(str(row[0]).strip() for row in batch.get("values", []) if row)
+    return ids
+
+
+def next_lesson_id(title: str | None = None, tutor: str = "", sh_id: str | None = None) -> str:
     """Следующий ID: [буква]DDMM + счётчик (12111, V12111, M12112)."""
-    prefix = tutor_id_prefix(tutor) + id_prefix()
+    if sh_id is None or title is None:
+        default_book, default_title = _target(tutor)
+        sh_id = sh_id or default_book
+        title = title or default_title
+    series = tutor_id_prefix(tutor)
+    prefix = series + id_prefix()
     mx = 0
-    for lid in _ids_from_all():
+    for lid in _fresh_series_ids(sh_id, title, bool(series)):
         if not lid.startswith(prefix):
             continue
         suffix = lid[len(prefix):]
@@ -222,10 +259,9 @@ def find_next_free_row(title: str | None = None,
         sh_id, default_title = _target()
         title = title or default_title
     title = title or "Чеки"
-    try:
-        rows = get_values(sh_id, f"'{title}'!A1:L")
-    except Exception:  # noqa: BLE001 — листа ещё нет
-        return FIRST_DATA_ROW
+    from sheets_util import invalidate_values_cache
+    invalidate_values_cache()
+    rows = get_values(sh_id, f"'{title}'!A1:L")
     last = FIRST_DATA_ROW - 1
     for n, row in enumerate(rows, start=1):
         if n < FIRST_DATA_ROW:
@@ -250,7 +286,7 @@ def _text_color(sh_id: str) -> dict:
     return WHITE
 
 
-def _format_row(sh_id: str, title: str, row: int) -> None:
+def _format_row(sh_id: str, title: str, row: int, paid: bool = False) -> None:
     """Текст по центру, без фона, тонкие серые границы — как в «Чеках»."""
     from sheets_util import sheets
     rng = {"sheetId": None, "startRowIndex": row - 1, "endRowIndex": row,
@@ -286,6 +322,11 @@ def _format_row(sh_id: str, title: str, row: int) -> None:
             "innerVertical": {"style": "SOLID", "width": 1, "color": BORDER},
         }},
     ]
+    if paid:
+        requests.append({"repeatCell": {
+            "range": {**rng, "startColumnIndex": 5, "endColumnIndex": 6},
+            "cell": {"userEnteredFormat": {"textFormat": {"foregroundColor": GREEN}}},
+            "fields": "userEnteredFormat.textFormat.foregroundColor"}})
     # sheetId нужен для диапазона — выясняем по названию листа
     meta = sheets().spreadsheets().get(spreadsheetId=sh_id).execute()
     sid = next(s["properties"]["sheetId"] for s in meta["sheets"]
@@ -306,10 +347,6 @@ def append_check(record: dict) -> int:
     """Дописывает занятие в свободную строку. Возвращает номер строки."""
     tutor = record.get("репетитор", "")
     sh_id, title = _target(tutor)
-    with _ID_LOCK:
-        ensure_target_sheet(title, sh_id)
-        row_num = find_next_free_row(title, sh_id)
-        _lid = str(next_lesson_id(title, tutor))
     values = [[
         record.get("время", ""),
         record.get("дата", ""),
@@ -322,26 +359,20 @@ def append_check(record: dict) -> int:
         record.get("как_прошло", "Отлично"),
         record.get("будут", "Да"),
         record.get("комиссия", ""),
-        _lid,
     ]]
-    update_values(sh_id, f"'{title}'!A{row_num}:L{row_num}", values,
-                  value_input_option="USER_ENTERED")
-    invalidate_cache()
-
-    # сверка: перечитали строку
-    back = get_values(sh_id, f"'{title}'!A{row_num}:F{row_num}")
-    got = back[0] if back else []
-    if len(got) < 6 or not _cell(got, 2) or not _cell(got, 3) or not _cell(got, 5):
-        raise RuntimeError(f"Не удалось подтвердить запись в строку {row_num}: {got}")
-
-    try:
-        _format_row(sh_id, title, row_num)
-    except Exception as e:  # noqa: BLE001 — формат не должен ломать запись
-        log(f"Не удалось оформить строку {row_num}: {e}")
+    with _ID_LOCK:
+        ensure_target_sheet(title, sh_id)
+        row_num = find_next_free_row(title, sh_id)
+        lid = str(next_lesson_id(title, tutor, sh_id))
+        values[0].append(lid)
+        # Устанавливаем статус на пустой строке до записи. При отказе
+        # API повторное подтверждение не создаст второе занятие.
+        _format_row(sh_id, title, row_num, paid=record.get("оплачено") is True)
+        update_values(sh_id, f"'{title}'!A{row_num}:L{row_num}", values,
+                      value_input_option="USER_ENTERED")
+        invalidate_cache()
 
     log(f"CHECK записан в «{title}» строку {row_num}: {values[0]}")
-    # Сумма всегда остаётся БЕЛОЙ: подтверждает и перекрашивает человек,
-    # а не бот. Цвет ставится вручную в таблице или кнопкой организатора.
     # цвет имени репетитора, если настроен
     try:
         _tcolor = get_tutor_color(tutor)
@@ -518,6 +549,8 @@ def _rows_from(sh_id: str, title: str,
             "комиссия": _cell(row, 10),
             "id": _cell(row, 11),
             "лист": _cell(row, 12) if len(row) > 12 else title,
+            "spreadsheet_id": sh_id,
+            "sheet_title": title,
         })
     return out
 
@@ -1357,11 +1390,10 @@ def update_lesson(lesson_id: str, record: dict,
         return False
     sh_id, sheet_title, row = found
     # если поле не передано — оставляем как было в таблице
-    try:
-        old = get_values(sh_id, f"'{sheet_title}'!A{row}:L{row}")
-        old = old[0] if old else []
-    except Exception:  # noqa: BLE001
-        old = []
+    existing = get_values(sh_id, f"'{sheet_title}'!A{row}:L{row}")
+    if not existing or _cell(existing[0], 11) != str(lesson_id):
+        return False
+    old = existing[0]
 
     def _keep(key: str, idx: int, default: str = "") -> str:
         if key in record and record.get(key) is not None:
@@ -1407,6 +1439,33 @@ def delete_lesson(lesson_id: str, title: str | None = None) -> bool:
     clear_values(sh_id, f"'{sheet_title}'!A{row}:L{row}")
     log(f"CHECK удалён id={lesson_id} ({sheet_title}) строка {row}")
     invalidate_cache()
+    return True
+
+
+def change_tutor_lesson(target: dict, tutor: str, *, amount: int | None = None,
+                        delete: bool = False) -> bool:
+    """Меняет только собственную запись в книге, из которой она была прочитана."""
+    from sheets_util import clear_values
+
+    lid = str(target.get("id") or "")
+    if not lid or not tutor or target.get("репетитор") != tutor:
+        return False
+    if delete == (amount is not None):
+        raise ValueError("Требуется одно действие с записью")
+    spreadsheet = target["spreadsheet_id"]
+    sheet = "'" + target["sheet_title"].replace("'", "''") + "'"
+    with _ID_LOCK:
+        rows = get_values(spreadsheet, f"{sheet}!A1:L", fresh=True)
+        matches = [n for n, row in enumerate(rows[1:], start=2)
+                   if _cell(row, 11) == lid and norm_name(_cell(row, 2)) == tutor]
+        if len(matches) != 1:
+            return False
+        row = matches[0]
+        if delete:
+            clear_values(spreadsheet, f"{sheet}!A{row}:L{row}")
+        else:
+            update_values(spreadsheet, f"{sheet}!F{row}", [[amount]])
+        invalidate_cache()
     return True
 
 

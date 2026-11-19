@@ -170,20 +170,23 @@ def ensure_personal_ids() -> int:
     return added
 
 
-def _next_id(tutor: str = "") -> str:
-    """Следующий ID расписания: M1/V1 для личных таблиц, число для общей."""
+def _next_record(rows: list[list[str]], tutor: str) -> tuple[int, str]:
+    """Номер свободной строки и следующий ID для таблицы репетитора."""
     letter = id_letter(tutor)
     mx = 0
-    for n, row in enumerate(_rows_for(tutor), start=1):
+    last = 1
+    for n, row in enumerate(rows, start=1):
         if n == 1 or not row:
             continue
+        if any(str(value).strip() for value in row):
+            last = n
         raw = str(row[0]).strip()
         if letter:
             if raw.startswith(letter) and raw[len(letter):].isdigit():
                 mx = max(mx, int(raw[len(letter):]))
         elif raw.isdigit():
             mx = max(mx, int(raw))
-    return f"{letter}{mx + 1}"
+    return last + 1, f"{letter}{mx + 1}"
 
 
 CANCEL_SHEET = "Отмены"
@@ -205,17 +208,22 @@ def ensure_cancel_sheet(sh_id: str = "", tutor: str = "") -> str:
     return CANCEL_SHEET
 
 
-def _cancel_rows(tutor: str = "") -> list[list[str]]:
+def _cancel_rows(tutor: str = "", *, fresh: bool = False) -> list[list[str]]:
     """Отмены из таблицы репетитора (или текущей)."""
     sh_id = sheet_for(tutor)
-    return sheets_util.get_values(sh_id, f"'{CANCEL_SHEET}'!A1:E")
+    return sheets_util.get_values(sh_id, f"'{CANCEL_SHEET}'!A1:E", fresh=fresh)
 
 
-def cancels_for(tutor: str) -> list[dict]:
+def cancels_for(tutor: str, *, strict: bool = False) -> list[dict]:
     out = []
     try:
-        rows = _cancel_rows(tutor)
-    except Exception:
+        rows = _cancel_rows(tutor, fresh=strict)
+    except Exception as exc:
+        # В новой книге лист отмен появляется после первой отмены.
+        missing_sheet = (getattr(getattr(exc, "resp", None), "status", None) == 400
+                         and "unable to parse range" in str(exc).lower())
+        if strict and not missing_sheet:
+            raise
         return []
     for n, row in enumerate(rows, start=1):
         if n == 1 or len(row) < 4 or not norm_name(row[1]):
@@ -231,36 +239,26 @@ def cancels_for(tutor: str) -> list[dict]:
     return out
 
 
-def add_cancel(tutor: str, student: str, day: dt.date, time_str: str) -> int:
+def _cancel_record(tutor: str, student: str, day: dt.date, time_str: str):
+    row, rid = _next_record(_cancel_rows(tutor), tutor)
+    return rid, {"range": f"'{CANCEL_SHEET}'!A{row}:E{row}",
+                 "values": [[rid, tutor, student, day.strftime("%d.%m.%Y"), time_str]]}
+
+
+def add_cancel(tutor: str, student: str, day: dt.date, time_str: str) -> str:
     sh_id = sheet_for(tutor)
     ensure_cancel_sheet(sh_id, tutor)
-    rows = _cancel_rows(tutor)
-    last = 1
-    letter = id_letter(tutor)
-    max_id = 0
-    for n, row in enumerate(rows, start=1):
-        row = row or []
-        if any(str(x).strip() for x in row):
-            last = n
-        raw = str(row[0]).strip() if row else ""
-        if letter:
-            if raw.startswith(letter) and raw[len(letter):].isdigit():
-                max_id = max(max_id, int(raw[len(letter):]))
-        elif raw.isdigit():
-            max_id = max(max_id, int(raw))
-    rid = f"{letter}{max_id + 1}"
-    sheets_util.update_values(
-        sh_id, f"'{CANCEL_SHEET}'!A{last + 1}:E{last + 1}",
-        [[str(rid), tutor, student, day.strftime("%d.%m.%Y"), time_str]])
+    rid, record = _cancel_record(tutor, student, day, time_str)
+    sheets_util.update_values(sh_id, record["range"], record["values"])
     log(f"ОТМЕНА: {tutor} — {student} {day:%d.%m} {time_str}")
     return rid
 
 
-def is_cancelled(tutor: str, day: dt.date, time_str: str) -> bool:
+def is_cancelled(tutor: str, day: dt.date, time_str: str, *, strict: bool = False) -> bool:
     want = parse_time_slot(time_str)
     if want is None:
         return False
-    for c in cancels_for(tutor):
+    for c in cancels_for(tutor, strict=strict):
         got = parse_time_slot(c["время"])
         if got is not None and c["дата"] == day and got == want:
             return True
@@ -359,6 +357,23 @@ def add_one_time(tutor: str, student: str, parent: str, day: dt.date,
                      time_str, price)
 
 
+def move_occurrence(entry: dict, day: dt.date, new_time: str) -> str:
+    """Погасить исходный слот на одну дату и добавить замену одним запросом."""
+    tutor, student = entry["репетитор"], entry["ученик"]
+    sh_id = sheet_for(tutor)
+    ensure_cancel_sheet(sh_id, tutor)
+    if is_cancelled(tutor, day, entry["время"], strict=True):
+        raise ValueError("Исходное занятие уже отменено или перенесено.")
+    row, rid = _next_record(_rows(tutor), tutor)
+    _, cancel = _cancel_record(tutor, student, day, entry["время"])
+    new_lesson = {"range": f"'{SHEET}'!A{row}:I{row}",
+                  "values": [[rid, tutor, student, entry.get("родитель", ""),
+                              day.strftime("%d.%m.%Y"), new_time,
+                              entry.get("цена", ""), "да", ""]]}
+    sheets_util.update_values_batch(sh_id, [cancel, new_lesson])
+    return rid
+
+
 def cleanup_expired() -> int:
     """Удалить разовые занятия, дата которых уже прошла."""
     today = dt.date.today()
@@ -371,9 +386,10 @@ def cleanup_expired() -> int:
     return removed
 
 
-def entries_of(tutor: str, only_active: bool = True) -> list[dict]:
+def entries_of(tutor: str, only_active: bool = True, *, strict: bool = False) -> list[dict]:
     out = []
-    for n, row in enumerate(_rows_for(tutor), start=1):
+    rows = _rows(tutor) if strict else _rows_for(tutor)
+    for n, row in enumerate(rows, start=1):
         if n == 1 or len(row) < 2 or not norm_name(row[1]):
             continue
         if norm_name(row[1]) != norm_name(tutor):
@@ -403,13 +419,7 @@ def add_entry(tutor: str, student: str, parent: str, days: str, time_str: str,
               price: str) -> str:
     """Добавляет запись расписания. Возвращает ID."""
     sh_id = sheet_for(tutor)
-    rows = _rows_for(tutor)
-    last = 1
-    for n, row in enumerate(rows, start=1):
-        if any(str(x).strip() for x in row):
-            last = n
-    rid = _next_id(tutor)
-    row_num = last + 1
+    row_num, rid = _next_record(_rows(tutor), tutor)
     sheets_util.update_values(
         sh_id, f"'{SHEET}'!A{row_num}:I{row_num}",
         [[str(rid), tutor, student, parent, days, time_str, price, "да", ""]])

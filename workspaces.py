@@ -46,7 +46,7 @@ def ensure_tutors(load_state, save_state_fn) -> list[str]:
     have = {int(t["id"]) for t in tutors if str(t.get("id", "")).lstrip("-").isdigit()}
     added: list[str] = []
     for tid, name in WORKSPACE_TUTORS:
-        if tid not in have:
+        if tid not in have and tid not in st.get("revoked_tutor_ids", []):
             tutors.append({"id": tid, "name": name})
             added.append(name)
     if added:

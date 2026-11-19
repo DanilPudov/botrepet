@@ -268,11 +268,11 @@ def invalidate_values_cache() -> None:
     _VALUES_CACHE.clear()
 
 
-def get_values(spreadsheet_id: str, range_: str) -> list[list[str]]:
+def get_values(spreadsheet_id: str, range_: str, *, fresh: bool = False) -> list[list[str]]:
     import time as _t
     key = (spreadsheet_id, range_)
     hit = _VALUES_CACHE.get(key)
-    if hit is not None and _t.time() - hit[0] < _VALUES_TTL:
+    if not fresh and hit is not None and _t.time() - hit[0] < _VALUES_TTL:
         return hit[1]
     resp = _retry_429(
         lambda: (sheets()
@@ -325,6 +325,15 @@ def update_values(spreadsheet_id: str, range_: str, values: list[list], *,
                      body=body,
                  )
                  .execute()))
+
+
+def update_values_batch(spreadsheet_id: str, data: list[dict]) -> dict:
+    """Записать связанные диапазоны одной операцией."""
+    invalidate_values_cache()
+    _BATCH_CACHE.clear()
+    return _retry_429(lambda: sheets().spreadsheets().values().batchUpdate(
+        spreadsheetId=spreadsheet_id,
+        body={"valueInputOption": "USER_ENTERED", "data": data}).execute())
 
 
 def clear_values(spreadsheet_id: str, range_: str) -> None:

@@ -24,6 +24,7 @@ import datetime as dt
 import json
 import re
 import sys
+from collections import Counter
 from pathlib import Path
 
 try:  # эмодзи в консоли Windows
@@ -154,46 +155,87 @@ def parse_date(s: str) -> dt.date:
     return dt.datetime.strptime(s.strip(), "%d.%m.%Y").date()
 
 
+_CHECK_FIELDS = ("время", "дата", "репетитор", "ученик", "родитель", "сумма",
+                 "комментарий", "первое", "как_прошло", "будут", "комиссия", "id")
+_NEW_COLUMNS = {field: i for i, field in enumerate(_CHECK_FIELDS)}
+_OLD_COLUMNS = {field: i for i, field in enumerate(
+    field for field in _CHECK_FIELDS if field not in ("родитель", "id"))}
+_HEADER_NAMES = {
+    "время": "время", "дата": "дата", "репетитор": "репетитор",
+    "ученик": "ученик", "имя ученика": "ученик",
+    "родитель": "родитель", "имя родителя": "родитель", "сумма": "сумма",
+    "комментарий": "комментарий", "первое ли занятие": "первое",
+    "первое занятие": "первое", "как прошло занятие": "как_прошло",
+    "будут заниматься": "будут", "комиссия": "комиссия", "id занятия": "id",
+}
+
+
+def _check_columns(header: list) -> dict[str, int]:
+    columns = {}
+    for i, value in enumerate(header):
+        label = " ".join(str(value).partition("(")[0].casefold().split()).strip(" ?.")
+        field = _HEADER_NAMES.get(label)
+        if field is not None:
+            if field in columns:
+                raise ValueError(f"В шапке листа чеков повторяется поле «{field}»")
+            columns[field] = i
+    missing = {"дата", "репетитор", "ученик", "сумма"} - columns.keys()
+    if missing:
+        raise ValueError("В шапке листа чеков отсутствуют поля: " + ", ".join(sorted(missing)))
+    return columns
+
+
 def checks_rows(start: dt.date) -> list[dict]:
     cfg = load_config()
-    title = cfg["sheets"]["recept_checks_sheet"]
-    rows = get_values(cfg["sheets"]["recept"], f"'{title}'!A1:J")
+    title = cfg["sheets"]["recept_checks_sheet"].replace("'", "''")
+    rows = get_values(cfg["sheets"]["recept"], f"'{title}'")
+    if not rows:
+        return []
+    layout = _check_columns(rows[0])
+    # При обновлении шапки старые строки остались на прежних местах.
+    # Правило смещения применимо только к стандартной новой шапке.
+    mixed = all(layout.get(f) == i for f, i in _NEW_COLUMNS.items() if f != "id")
     out = []
-    for n, row in enumerate(rows, start=1):
-        if n < 2 or len(row) < 5:
+    for n, row in enumerate(rows[1:], start=2):
+        columns = layout
+        if mixed and len(row) >= 5:
+            # У старого формата G — ответ о первом занятии, у нового
+            # G — комментарий. Не принимаем телефон в E за сумму,
+            # если в F есть сумма или в L записан ID нового формата.
+            has_id = len(row) > 11 and bool(str(row[11]).strip())
+            has_first_answer = len(row) > 6 and str(row[6]).strip().casefold() in ("да", "нет")
+            if (not has_id and has_first_answer and parse_int(row[4]) is not None
+                    and (len(row) < 6 or parse_int(row[5]) is None)):
+                columns = _OLD_COLUMNS
+        values = {key: str(row[i]).strip() if i < len(row) else ""
+                  for key, i in columns.items()}
+        try:
+            day = parse_date(values["дата"])
+        except ValueError:
             continue
-        if not norm_name(row[2]) or not str(row[1]).strip():
+        amount = parse_int(values["сумма"])
+        tutor = norm_key_name(values["репетитор"])
+        if day < start or not tutor or amount is None:
             continue
-        d = cell_date(row)
-        if d is None or d < start:
-            continue
-        s = parse_int(row[4])
-        if s is None:
-            continue
-        out.append({"row": n, "дата": d, "время": str(row[0]).strip() if row[0] else "",
-                    "репетитор": norm_key_name(row[2]), "ученик": row[3], "сумма": s,
-                    "комментарий": row[5] if len(row) > 5 else "",
-                    "первое": row[6] if len(row) > 6 else "",
-                    "как_прошло": row[7] if len(row) > 7 else "",
-                    "будут": row[8] if len(row) > 8 else "",
-                    "комиссия": row[9] if len(row) > 9 else ""})
+        student = values["ученик"]
+        if values.get("родитель"):
+            student += f" ({values['родитель']})"
+        entry = {key: values.get(key, "") for key in
+                 ("время", "комментарий", "первое", "как_прошло", "будут", "комиссия")}
+        entry.update(row=n, дата=day, репетитор=tutor, ученик=student, сумма=amount)
+        out.append(entry)
     return out
 
 
 def match(checks: list[dict], ops: list[dict]) -> list[dict]:
-    """Сопоставление: одна операция — не больше одной записи; та же дата + сумма."""
-    used = set()
+    """Подтверждаем только однозначное соответствие даты и суммы."""
+    lesson_counts = Counter((c["дата"], int(c["сумма"])) for c in checks)
+    op_counts = Counter((o["dt"].date(), int(o["sum"])) for o in ops)
     for c in checks:
-        found = None
-        for i, o in enumerate(ops):
-            if i in used:
-                continue
-            if o["dt"].date() == c["дата"] and int(o["sum"]) == int(c["сумма"]):
-                found = i
-                break
-        c["paid"] = found is not None
-        if found is not None:
-            used.add(found)
+        key = (c["дата"], int(c["сумма"]))
+        count = op_counts[key]
+        c["paid"] = count == 1 and lesson_counts[key] == 1
+        c["ambiguous"] = count > 0 and not c["paid"]
     return checks
 
 
@@ -506,7 +548,8 @@ def block_bounds() -> tuple[int, int] | None:
 # --------------------------------------------------------------------------- #
 def build_report(checks: list[dict]) -> str:
     ok = [c for c in checks if c["paid"]]
-    bad = [c for c in checks if not c["paid"]]
+    uncertain = [c for c in checks if c.get("ambiguous")]
+    bad = [c for c in checks if not c["paid"] and not c.get("ambiguous")]
     ok_sum = sum(c["сумма"] for c in ok)
     total_sum = sum(c["сумма"] for c in checks)
 
@@ -521,6 +564,11 @@ def build_report(checks: list[dict]) -> str:
     if bad:
         lines += ["", "⚠️ Не нашлись в выписке (красные):"]
         for c in bad:
+            lines.append(f"  {c['дата']:%d.%m} {c['время']} — {c['репетитор']} — {c['ученик']} — {c['сумма']} ₽")
+
+    if uncertain:
+        lines += ["", "⚪ Совпадают дата и сумма нескольких записей. Проверьте отправителя вручную:"]
+        for c in uncertain:
             lines.append(f"  {c['дата']:%d.%m} {c['время']} — {c['репетитор']} — {c['ученик']} — {c['сумма']} ₽")
 
     bal = commission_balances()
@@ -557,7 +605,8 @@ def main():
     checks = match(checks_rows(start), ops)
     print(build_report(checks))
 
-    fresh, dups = (checks, []) if args.allow_dups else drop_duplicates(checks)
+    resolved = [c for c in checks if not c.get("ambiguous")]
+    fresh, dups = (resolved, []) if args.allow_dups else drop_duplicates(resolved)
     if dups:
         print(f"\n⏭ Уже есть в «Истории», пропускаю: {len(dups)}")
         for c in dups:

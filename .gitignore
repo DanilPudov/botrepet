@@ -1,10 +1,15 @@
 # секреты — НЕ в git (загружаются через файловый менеджер в /app/data)
-service_account.json
-service_account*.json
+*.json
+!config.example.json
+!bothost.json
+*.jsonl
+data/
+.env
+.env.*
+.github_token
+GOOGLE_KEY*.txt
 *.pem
 *.key
-state.json
-state.backup*.json
 
 # состояние и логи
 bot.log

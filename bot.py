@@ -43,7 +43,7 @@ from telegram import (
     LinkPreviewOptions,
 )
 from telegram.constants import ParseMode
-from telegram.error import InvalidToken
+from telegram.error import InvalidToken, NetworkError, RetryAfter
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -120,13 +120,15 @@ def role_of(user_id: int) -> str | None:
     cfg = load_config()
     if user_id in {int(x) for x in cfg.get("owner_ids", [])}:
         return OWNER
+    if user_id in state.get("revoked_tutor_ids", []):
+        return None
     # «Данил 2» — обычный репетитор (без админ-панели)
     if _ws.is_test_account(user_id):
         return TUTOR
     ids = {int(t["id"]): t for t in state.get("tutors", [])}
     if user_id in ids:
         return OWNER if ids[user_id].get("role") == "owner" else TUTOR
-    # Максим и Вика — доступ всегда, даже если state.json на сервере старый
+    # Совместимость со старым state.json до регистрации встроенных аккаунтов.
     try:
         if any(int(tid) == int(user_id) for tid, _ in _ws.WORKSPACE_TUTORS):
             return TUTOR
@@ -174,7 +176,14 @@ def tutor_names() -> list[str]:
 
 def view_as_name(user_id: int) -> str | None:
     """Режим организатора: за какого репетитора он сейчас смотрит."""
-    return (load_state().get("view_as") or {}).get(str(user_id))
+    selected = (load_state().get("view_as") or {}).get(str(user_id))
+    if selected:
+        allowed = _view_allowed(user_id)
+        if allowed is None and role_of(user_id) == OWNER:
+            return selected
+        if allowed and norm_name(selected) in allowed and role_of(user_id):
+            return selected
+    return None
 
 
 def _full_name(user_id: int) -> str | None:
@@ -217,6 +226,15 @@ def name_by_id(user_id: int) -> str | None:
 # --------------------------------------------------------------------------- #
 # Клавиатуры
 # --------------------------------------------------------------------------- #
+def _my_lesson(user_id: int, lid: str) -> dict | None:
+    tutor = name_by_id(user_id)
+    if not tutor or not lid:
+        return None
+    matches = [x for x in checks_writer.read_lessons()
+               if x.get("репетитор") == tutor and str(x.get("id") or "") == lid]
+    return matches[0] if len(matches) == 1 else None
+
+
 def kb(rows: list[list[tuple[str, str]]], home: bool = True) -> InlineKeyboardMarkup:
     """Клавиатура из пар (текст, callback).
 
@@ -371,7 +389,7 @@ def _view_allowed(user_id: int) -> list[str] | None:
         except (KeyError, ValueError, TypeError):
             continue
         allowed = t.get("can_view")
-        if allowed:
+        if allowed is not None:
             return [norm_name(x) for x in allowed]
     return None
 
@@ -1315,6 +1333,10 @@ async def _nav_go(update: Update, context: ContextTypes.DEFAULT_TYPE,
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     user = q.from_user
+    role = role_of(user.id)
+    if role is None:
+        await q.answer("Нет доступа", show_alert=True)
+        return
     data = _NAV_PENDING.pop(user.id, None) or (q.data or "")
     if data == "nav:back":
         await _nav_go(update, context, _nav_pop(user.id))
@@ -1330,14 +1352,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await _cleanup_tracked(update, context, keep_id=keep)
         except Exception:  # noqa: BLE001
             pass
-    role = role_of(user.id)
     try:
         await _maybe_send_note(context.bot, user.id)
     except Exception:  # noqa: BLE001
         pass
-    if role is None:
-        await q.answer("Нет доступа", show_alert=True)
-        return
 
     if data == "cancel":
         set_pending(user.id, None)
@@ -1462,10 +1480,21 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parts = data.split(":")
         action, rid = parts[1], parts[2]
         date_s = parts[3] if len(parts) > 3 else ""
-        entries = {str(e["id"]): e for e in schedule_module.all_entries()}
-        entry = entries.get(str(rid))
+        entry = next((e for e in schedule_module.all_entries()
+                      if str(e["id"]) == rid
+                      and (int(e.get("telegram_id") or 0) or _chat_id_by_tutor(e["репетитор"]))
+                      == user.id), None)
         if not entry:
             await q.answer("Запись расписания не найдена", show_alert=True)
+            return
+        try:
+            day = dt.datetime.strptime(date_s, "%d.%m.%Y").date()
+        except ValueError:
+            await q.answer("Дата занятия не найдена", show_alert=True)
+            return
+        if (schedule_module.next_occurrence(entry, day) != day
+                or schedule_module.is_cancelled(entry["репетитор"], day, entry["время"], strict=True)):
+            await q.answer("Это занятие уже отменено или перенесено", show_alert=True)
             return
         if action == "ok":
             if role_of(user.id) != OWNER:
@@ -1553,6 +1582,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         if action == "no":
+            schedule_module.add_cancel(entry["репетитор"], entry["ученик"], day, entry["время"])
             await q.answer()
             await q.edit_message_text("❌ Отменено, запись не добавлена.")
             return
@@ -1560,7 +1590,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.answer()
             p = get_pending(user.id) or {}
             p.update({"шаг": "перенос_время", "remind_id": entry["id"],
-                      "remind_date": date_s})
+                      "remind_date": date_s, "remind_tutor": entry["репетитор"]})
             set_pending(user.id, p)
             await q.edit_message_text(
                 "🔁 Напишите новое время занятия, например `19:00`.",
@@ -1568,6 +1598,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
     if data.startswith("view:"):
+        only = _view_allowed(user.id)
+        if role != OWNER and not only:
+            await q.answer("Нет доступа", show_alert=True)
+            return
         await q.answer()
         arg = data.split(":", 1)[1]
         st = load_state()
@@ -1576,7 +1610,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             save_state(st)
             await show_main(update, context, edit=True)
             return
-        only = _view_allowed(user.id)
         names: list[str] = []
         for t in st.get("tutors", []):
             nm = (t.get("name") or "").strip()
@@ -1595,6 +1628,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "view_mode":
+        if role != OWNER and not _view_allowed(user.id):
+            await q.answer("Нет доступа", show_alert=True)
+            return
         await q.answer()
         await show_owner_picker(update, context)
         return
@@ -1636,9 +1672,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("pay:"):
         lid = data.split(":", 1)[1]
         try:
-            checks_writer.set_lesson_paid(lid, True, title=_sheet_of(lid))
+            updated = checks_writer.set_lesson_paid(lid, True, title=_sheet_of(lid))
         except Exception as e:  # noqa: BLE001
             await q.answer(f"Ошибка: {e}", show_alert=True)
+            return
+        if not updated:
+            await q.answer("Запись не найдена. Обновите список.", show_alert=True)
             return
         await q.answer("✅ Подтверждено")
         await show_past_week(update, context)
@@ -1647,9 +1686,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("unpay:"):
         lid = data.split(":", 1)[1]
         try:
-            checks_writer.set_lesson_paid(lid, False, title=_sheet_of(lid))
+            updated = checks_writer.set_lesson_paid(lid, False, title=_sheet_of(lid))
         except Exception as e:  # noqa: BLE001
             await q.answer(f"Ошибка: {e}", show_alert=True)
+            return
+        if not updated:
+            await q.answer("Запись не найдена. Обновите список.", show_alert=True)
             return
         await q.answer("↩️ Снято подтверждение")
         await show_past_week(update, context)
@@ -1728,19 +1770,18 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_mine_records(update, context)
         return
 
-    if data.startswith("mact:"):
-        lid = data.split(":", 1)[1]
+    if data.startswith(("mact:", "msum:", "mres:", "mdel:")):
+        lid = data.rsplit(":", 1)[-1]
         try:
-            lessons = checks_writer.read_lessons()
+            target = _my_lesson(user.id, lid)
         except Exception as e:  # noqa: BLE001
             await q.answer(f"Ошибка чтения: {e}", show_alert=True)
             return
-        target = next((x for x in lessons
-                       if str(x.get("id") or "") == lid), None)
         if not target:
-            await q.answer("Запись не найдена", show_alert=True)
-            await show_mine_records(update, context)
+            await q.answer("Запись недоступна. Откройте список заново.", show_alert=True)
             return
+
+    if data.startswith("mact:"):
         await q.answer()
         await q.edit_message_text(
             f"{target['дата']:%d.%m} {target['ученик']} — {target['сумма']} ₽\n\n"
@@ -1767,12 +1808,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("mres:"):
         await q.answer()
         lid = data.split(":", 1)[1]
-        target = next((x for x in checks_writer.read_lessons()
-                       if str(x.get("id") or "") == lid), None)
-        if not target:
-            await q.edit_message_text("Запись не найдена.",
-                                      reply_markup=kb([[("⬅️ Назад", "mine:edit")]]))
-            return
         p = {"шаг": "перенос_дата", "edit_id": lid,
              "репетитор": target["репетитор"], "ученик": target["ученик"],
              "сумма": str(target["сумма"])}
@@ -1787,16 +1822,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("mdel:yes:"):
         await q.answer()
         lid = data.split(":", 2)[2]
-        _sheet = ""
         try:
-            for _x in checks_writer.read_lessons():
-                if str(_x.get("id") or "") == lid:
-                    _sheet = _x.get("лист") or ""
-                    break
-        except Exception:  # noqa: BLE001
-            _sheet = ""
-        try:
-            ok = checks_writer.delete_lesson(lid, title=_sheet or None)
+            ok = checks_writer.change_tutor_lesson(target, name_by_id(user.id), delete=True)
         except Exception as e:  # noqa: BLE001
             log(f"Ошибка удаления записи: {e}")
             await q.edit_message_text(f"❌ Не удалось удалить: {e}",
@@ -3414,13 +3441,25 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not t:
             await _send(update, "Не понял время. Например: 19:00")
             return
-        rid = p.get("remind_id")
-        date_s = p.get("remind_date", "")
         try:
-            _update_entry_time(rid, t)
+            day = dt.datetime.strptime(p.get("remind_date", ""), "%d.%m.%Y").date()
+            entry = schedule_module.get_entry(p["remind_id"], p.get("remind_tutor") or name_by_id(user.id))
+            if not entry or schedule_module.next_occurrence(entry, day) != day:
+                raise ValueError("Исходное занятие не найдено в расписании.")
+            if day < dt.date.today():
+                raise ValueError("Дата занятия уже прошла.")
+            if _occupied_slot(entry["репетитор"], day, t):
+                raise ValueError("На это время уже есть занятие. Выберите другое время.")
+            schedule_module.move_occurrence(entry, day, t)
+        except ValueError as e:
+            await _send(update, str(e))
+            return
         except Exception as e:  # noqa: BLE001
-            log(f"Не смог обновить время расписания: {e}")
+            log(f"Не удалось подтвердить перенос в таблице: {e}")
+            await _send(update, "Не удалось подтвердить перенос. Проверьте расписание и повторите.")
+            return
         set_pending(user.id, None)
+        await _resched_now(context)
         await _send(update, 
             f"🔁 Перенесено на {t}. Напоминание придёт через час после начала.",
             reply_markup=kb([[("Меню", "menu")]]))
@@ -3610,33 +3649,19 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await _send(update, "Не понял дату. Формат: 12.11 18:00 Полина")
             return
         t = parse_time(rt)
+        if not t:
+            await _send(update, "Не понял время. Пример: 18:00")
+            return
         student, parent = who, ""
         if "(" in who and who.endswith(")"):
             student = who[:who.index("(")].strip()
             parent = who[who.index("(") + 1:-1].strip()
         tutor = p.get("репетитор") or name_by_id(user.id) or ""
         st = students_module.find_student(tutor, student, parent=parent) or {}
-        # зачёркиваем чужое занятие в это же время, если есть
-        for e in schedule_module.entries_of(tutor):
-            single = schedule_module.one_time_date(str(e.get("дни", "")))
-            same_day = (single == d) if single else (
-                d.weekday() in schedule_module.parse_days(str(e.get("дни", ""))))
-            if (same_day and norm_name(e.get("ученик", "")) != norm_name(student)
-                    and schedule_module.parse_time_slot(str(e.get("время", ""))) ==
-                    schedule_module.parse_time_slot(t)):
-                schedule_module.add_cancel(tutor, e.get("ученик", ""), d, t)
-        busy = []
-        for _e in schedule_module.entries_of(tutor):
-            _single = schedule_module.one_time_date(str(_e.get("дни", "")))
-            _same = (_single == d) if _single else (
-                d.weekday() in schedule_module.parse_days(str(_e.get("дни", ""))))
-            if (_same and schedule_module.parse_time_slot(str(_e.get("время", ""))) ==
-                    schedule_module.parse_time_slot(t)
-                    and norm_name(_e.get("ученик", "")) != norm_name(student)):
-                busy.append(_e.get("ученик", ""))
+        busy = _occupied_slot(tutor, d, t)
         if busy:
             await _send(update,
-                        f"⚠️ На {d:%d.%m} {t} уже стоит: {', '.join(busy)}.\n"
+                        f"⚠️ На {d:%d.%m} {t} уже стоит: {busy['ученик']}.\n"
                         "Разовое занятие не добавлено — выберите другое время.",
                         reply_markup=kb([[("📅 Расписание", "sched:week")]]))
             return
@@ -3650,6 +3675,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # --- перенос занятия (разово)
     if step == "перенос_дата":
+        target = _my_lesson(user.id, str(p.get("edit_id") or ""))
+        if not target or target["репетитор"] != p.get("репетитор"):
+            set_pending(user.id, None)
+            await _send(update, "Запись недоступна. Откройте список заново.")
+            return
         import re as _re
         m = _re.match(r"^(\d{1,2}[.]\d{1,2}(?:[.]\d{2,4})?)\s+"
                       r"(\d{1,2}[:.]\d{2}|\d{1,2})$", text.strip())
@@ -3712,20 +3742,20 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await _send(update, "Напишите число, например 1700.")
             return
         lid = str(p.get("edit_id", ""))
-        for x in checks_writer.read_lessons():
-            if str(x.get("id") or "") == lid:
-                rec = {"время": x["время"], "дата": x["дата"].strftime("%d.%m.%Y"),
-                       "репетитор": x["репетитор"], "ученик": x["ученик"],
-                       "родитель": x.get("родитель", ""),
-                       "сумма": str(amt), "комментарий": x["комментарий"],
-                       "первое": x["первое"], "как_прошло": x["как_прошло"],
-                       "будут": x["будут"], "комиссия": x["комиссия"]}
-                checks_writer.update_lesson(lid, rec, title=x.get("лист"))
-                log_action(user.id, "изменил сумму",
-                           f"{x['репетитор']} — {x['ученик']} "
-                           f"→ {amt} ₽")
-                break
+        try:
+            target = _my_lesson(user.id, lid)
+            ok = target and checks_writer.change_tutor_lesson(
+                target, name_by_id(user.id), amount=amt)
+        except Exception as e:
+            log(f"Ошибка изменения суммы: {e}")
+            await _send(update, "Не удалось изменить сумму. Попробуйте ещё раз.")
+            return
         set_pending(user.id, None)
+        if not ok:
+            await _send(update, "Запись недоступна. Откройте список заново.")
+            return
+        log_action(user.id, "изменил сумму",
+                   f"{target['репетитор']} — {target['ученик']} → {amt} ₽")
         await _send(update, "✅ Запись изменена.",
                     reply_markup=kb([[("⬅️ " + _week_btn(user.id), "mine")]]))
         return
@@ -4366,6 +4396,8 @@ async def add_tutor(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state.setdefault("tutors", [])
     state["tutors"] = [t for t in state["tutors"] if int(t["id"]) != tid]
     state["tutors"].append({"id": tid, "name": name})
+    if tid in state.get("revoked_tutor_ids", []):
+        state["revoked_tutor_ids"].remove(tid)
     save_state(state)
     await update.message.reply_text(f"✅ {name} теперь может заполнять занятия (id {tid}).")
 
@@ -4398,11 +4430,17 @@ async def remove_tutor(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except ValueError:
         await update.message.reply_text("id должен состоять из цифр.")
         return
+    if tid in {int(x) for x in load_config().get("owner_ids", [])}:
+        await update.message.reply_text("Это организатор из настроек бота.")
+        return
+    if role_of(tid) is None:
+        await update.message.reply_text("Не найден.")
+        return
     state = load_state()
-    before = len(state.get("tutors", []))
     state["tutors"] = [t for t in state.get("tutors", []) if int(t["id"]) != tid]
+    state.setdefault("revoked_tutor_ids", []).append(tid)
     save_state(state)
-    await update.message.reply_text("Удалён." if len(state["tutors"]) < before else "Не найден.")
+    await update.message.reply_text("Удалён.")
 
 
 async def set_access(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4468,46 +4506,45 @@ def _sheet_of(lesson_id: str) -> str | None:
     return None
 
 
-def _update_entry_time(entry_id, time_str: str) -> bool:
-    """Перенести занятие по ID. Ищет во ВСЕХ таблицах (своя у Максима/Вики)."""
-    e = schedule_module.get_entry(entry_id)
-    if not e:
-        return False
-    ok = schedule_module.update_entry(
-        str(entry_id), str(e.get("дни", "")), time_str,
-        tutor=e.get("репетитор", ""), sh_id=e.get("sh_id", ""))
-    return bool(ok)
+def _occupied_slot(tutor: str, day: dt.date, time_str: str) -> dict | None:
+    slot = schedule_module.parse_time_slot(time_str)
+    for entry in schedule_module.entries_of(tutor, strict=True):
+        if (schedule_module.next_occurrence(entry, day) == day
+                and schedule_module.parse_time_slot(entry["время"]) == slot):
+            return entry
+    return None
 
 
 async def send_lesson_reminder(context: ContextTypes.DEFAULT_TYPE):
     """Через час после начала: полузаполненный чек с кнопками."""
     data = context.job.data or {}
-    entry = data.get("entry") or {}
+    snapshot = data.get("entry") or {}
     date_s = data.get("date", "")
-    if not entry:
+    if not snapshot:
         return
     key = data.get("key")
-    if key:
-        st = load_state()
-        st.setdefault("reminded", {})[key] = True
-        if len(st["reminded"]) > 300:
-            st["reminded"] = dict(list(st["reminded"].items())[-200:])
-        save_state(st)
+    if key and (load_state().get("reminded") or {}).get(key):
+        return
+    day = dt.datetime.strptime(date_s, "%d.%m.%Y").date()
+    entry = schedule_module.get_entry(snapshot["id"], snapshot["репетитор"])
+    if (not entry or schedule_module.next_occurrence(entry, day) != day
+            or entry["время"] != snapshot["время"]
+            or schedule_module.is_cancelled(entry["репетитор"], day, entry["время"], strict=True)):
+        return
     who = entry.get("ученик", "")
     if entry.get("родитель"):
         who += f" ({entry['родитель']})"
-    _cfg0 = load_config()
-    _chat0 = int(entry.get("telegram_id") or 0) or data.get("chat_id")
-    _owner0 = int(_chat0) in [int(x) for x in _cfg0.get("owner_ids", [])]
+    cfg = load_config()
+    chat = int(entry.get("telegram_id") or 0) or data.get("chat_id")
+    if chat is None or int(chat) in load_state().get("revoked_tutor_ids", []):
+        return
+    is_owner_chat = int(chat) in [int(x) for x in cfg.get("owner_ids", [])]
     text = (f"⏰ Занятие прошло?\n\n"
             f"🧒 {who}\n"
             f"📅 {date_s}  ⏰ {entry.get('время', '')}\n"
             f"💰 {entry.get('цена', '')} ₽\n\n"
             + ("Подтвердите оплату или перенесите:"
-               if _owner0 else "Отметьте, что занятие было, или перенесите:"))
-    chat = int(entry.get("telegram_id") or 0) or data.get("chat_id")
-    cfg = load_config()
-    is_owner_chat = int(chat) in [int(x) for x in cfg.get("owner_ids", [])]
+               if is_owner_chat else "Отметьте, что занятие было, или перенесите:"))
     if is_owner_chat:
         first_row = [("✅ Подтвердить оплату",
                       f"remind:ok:{entry['id']}:{date_s}")]
@@ -4525,6 +4562,21 @@ async def send_lesson_reminder(context: ContextTypes.DEFAULT_TYPE):
             ]))
     except Exception as e:  # noqa: BLE001
         log(f"Напоминание не доставлено: {e}")
+        attempt = data.get("attempt", 0)
+        queue = getattr(context, "job_queue", None)
+        if queue is not None and attempt < 3 and isinstance(e, (NetworkError, RetryAfter)):
+            delay = getattr(e, "retry_after", 60 * (2 ** attempt))
+            if isinstance(delay, dt.timedelta):
+                delay = delay.total_seconds()
+            queue.run_once(send_lesson_reminder, when=max(1, delay),
+                           data={**data, "attempt": attempt + 1}, name=f"remind-{key}")
+        return
+    if key:
+        st = load_state()
+        st.setdefault("reminded", {})[key] = True
+        if len(st["reminded"]) > 300:
+            st["reminded"] = dict(list(st["reminded"].items())[-200:])
+        save_state(st)
 
 
 async def _resched_now(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -4556,8 +4608,12 @@ async def reschedule_reminders(context: ContextTypes.DEFAULT_TYPE):
         if reminded.get(key) or reminded.get(old_key):
             continue
         try:
-            if jq.get_jobs_by_name(f"remind-{key}"):
+            pending_jobs = jq.get_jobs_by_name(f"remind-{key}")
+            if any(job.data.get("entry", {}).get("время") == entry["время"]
+                   for job in pending_jobs):
                 continue
+            for job in pending_jobs:
+                job.schedule_removal()
         except Exception:  # noqa: BLE001
             pass
         try:

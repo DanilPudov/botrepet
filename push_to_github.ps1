@@ -6,7 +6,19 @@
 param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Files)
 
 $ErrorActionPreference = "Stop"
-$root = "D:\Репетиторство DSH"
+$srcDir = $PSScriptRoot
+$root = Split-Path -Parent $srcDir
+if (-not $Files) { throw "Укажите файлы: .\push_to_github.ps1 bot.py" }
+$allowed = @("requirements.txt", "bothost.json", "Dockerfile", ".gitignore", "config.example.json")
+foreach ($f in $Files) {
+    if (($f -notmatch '^[a-zA-Z_][a-zA-Z0-9_]*\.py\z') -and ($allowed -cnotcontains $f)) {
+        throw "Этот файл не входит в список исходников для публикации: $f"
+    }
+    $item = Get-Item -LiteralPath (Join-Path $srcDir $f) -Force
+    if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw "Для публикации нужен обычный файл: $f"
+    }
+}
 $tokenPath = Join-Path $root ".github_token"
 $repoPath = Join-Path $root ".github_repo"
 
@@ -22,12 +34,8 @@ $headers = @{
     "X-GitHub-Api-Version" = "2022-11-28"
 }
 
-$srcDir = Join-Path $root "bot-git"
-if (-not $Files -or $Files.Count -eq 0) { throw "Укажите файлы: .\push_to_github.ps1 bot.py" }
-
 foreach ($f in $Files) {
     $local = Join-Path $srcDir $f
-    if (-not (Test-Path $local)) { Write-Host "НЕТ файла: $local" -ForegroundColor Red; continue }
 
     $url = "https://api.github.com/repos/$repo/contents/$f"
     $sha = $null
