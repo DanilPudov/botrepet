@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import datetime as dt
 import threading
+from http.client import IncompleteRead
 from pathlib import Path
 
 import os as _os
@@ -95,13 +96,13 @@ def log(msg: str) -> None:
 # --------------------------------------------------------------------------- #
 # Google Sheets
 # --------------------------------------------------------------------------- #
-_sheets_client = None
+# Транспорт httplib2 нельзя разделять между основным и фоновыми потоками.
+_sheets_clients = threading.local()
 
 
 def sheets():
-    """Клиент Google Sheets API (сервисный аккаунт из config)."""
-    global _sheets_client
-    if _sheets_client is None:
+    """Клиент Google Sheets API для текущего потока."""
+    if getattr(_sheets_clients, "client", None) is None:
         import sys
 
         # пакеты могут лежать рядом в ./pkgs (локальный запуск без установки)
@@ -125,10 +126,10 @@ def sheets():
                 creds = service_account.Credentials.from_service_account_info(
                     info,
                     scopes=["https://www.googleapis.com/auth/spreadsheets"])
-                _sheets_client = build("sheets", "v4", credentials=creds,
+                _sheets_clients.client = build("sheets", "v4", credentials=creds,
                                        cache_discovery=False,
                                        static_discovery=False)
-                return _RetryProxy(_sheets_client)
+                return _RetryProxy(_sheets_clients.client)
             except Exception as e:  # noqa: BLE001
                 log(f"Ключ Google из переменной окружения не подошёл: {e}")
 
@@ -150,10 +151,10 @@ def sheets():
         )
         # static_discovery=False: не требует локальных discovery-документов
         # (экономит ~107 МБ диска на сервере)
-        _sheets_client = build("sheets", "v4", credentials=creds,
+        _sheets_clients.client = build("sheets", "v4", credentials=creds,
                                cache_discovery=False,
                                static_discovery=False)
-    return _RetryProxy(_sheets_client)
+    return _RetryProxy(_sheets_clients.client)
 
 
 def _is_retryable(e: Exception) -> bool:
@@ -207,11 +208,10 @@ def _exec(request):
 
 def _drop_client() -> None:
     """Сбросить клиент Google: следующая попытка создаст новое соединение."""
-    global _sheets_client
-    _sheets_client = None
+    _sheets_clients.client = None
 
 
-def _retry_429(func, *args, **kwargs):
+def _retry_429(func, *args, retry_incomplete_read=False, **kwargs):
     """Повтор при квоте Google (429) и при обрывах соединения."""
     import time as _t
     last = None
@@ -219,7 +219,8 @@ def _retry_429(func, *args, **kwargs):
         try:
             return func(*args, **kwargs)
         except Exception as e:  # noqa: BLE001
-            if not _is_retryable(e):
+            incomplete_read = retry_incomplete_read and isinstance(e, IncompleteRead)
+            if not incomplete_read and not _is_retryable(e):
                 raise
             last = e
             # SSL/сеть: соединение испорчено — пересоздаём клиент
@@ -279,7 +280,9 @@ def get_values(spreadsheet_id: str, range_: str, *, fresh: bool = False) -> list
                  .spreadsheets()
                  .values()
                  .get(spreadsheetId=spreadsheet_id, range=range_)
-                 .execute()))
+                 .execute()),
+        retry_incomplete_read=True,
+    )
     out = resp.get("values", [])
     _VALUES_CACHE[key] = (_t.time(), out)
     return out
@@ -302,7 +305,9 @@ def get_values_batch(spreadsheet_id: str,
                  .values()
                  .batchGet(spreadsheetId=spreadsheet_id,
                            ranges=list(ranges))
-                 .execute()))
+                 .execute()),
+        retry_incomplete_read=True,
+    )
     out = [vr.get("values", []) for vr in resp.get("valueRanges", [])]
     _BATCH_CACHE[key] = (_t.time(), out)
     return out
