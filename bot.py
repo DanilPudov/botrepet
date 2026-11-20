@@ -4196,7 +4196,7 @@ async def show_mine_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             who = links_module.link_html(su, x["ученик"])
             if par:
                 who += " (" + links_module.link_html(pu, par) + ")"
-            st = flags.get(str(x.get("id") or ""), "")
+            st = checks_writer.lesson_payment_status(x, flags)
             mark = "✅ " if st == "paid" else ("❌ " if st == "no" else "⚪️ ")
             parts.append(f"  {mark}{tm} {who} — {x['сумма']} ₽")
     total = sum(x["сумма"] for x in lessons)
@@ -4205,8 +4205,8 @@ async def show_mine_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     head = (f"<b>{_title}</b> "
             f"({week_start:%d.%m}–{week_end:%d.%m})\n\n")
     payout = _ws.payout(total, tutor)
-    _tp = sum(1 for x in lessons if flags.get(str(x.get("id") or ""), "") == "paid")
-    _tn = sum(1 for x in lessons if flags.get(str(x.get("id") or ""), "") == "no")
+    _tp = sum(1 for x in lessons if checks_writer.lesson_payment_status(x, flags) == "paid")
+    _tn = sum(1 for x in lessons if checks_writer.lesson_payment_status(x, flags) == "no")
     _tu = len(lessons) - _tp - _tn
     _total_line = f"\n<b>Итого — {payout} ₽</b>"
     if not _ws.is_family(tutor):
@@ -4250,8 +4250,7 @@ async def show_past_week(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     rows = []
     paid_sum = no_sum = _unknown_sum = 0
     for x in lessons:
-        lid = str(x.get("id") or "")
-        st = flags.get(lid, "")
+        st = checks_writer.lesson_payment_status(x, flags)
         mark = "✅" if st == "paid" else ("❌" if st == "no" else "⚪️")
         stud = students_module.find_student(
             tutor, x["ученик"],
