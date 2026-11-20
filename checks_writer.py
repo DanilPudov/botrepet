@@ -19,7 +19,8 @@ from __future__ import annotations
 import datetime as dt
 import threading
 
-from sheets_util import get_values, update_values, load_config, log, norm_name, _exec
+from sheets_util import (get_values, update_values, load_config, log, norm_name,
+                         legacy_record_id, next_record_id, _exec)
 
 KEY_COLS = (2, 3, 5)  # C репетитор, D ученик, F сумма (0-based)
 FIRST_DATA_ROW = 2
@@ -217,22 +218,18 @@ def _fresh_series_ids(sh_id: str, title: str, personal: bool) -> list[str]:
     return ids
 
 
-def next_lesson_id(title: str | None = None, tutor: str = "", sh_id: str | None = None) -> str:
-    """Следующий ID: [буква]DDMM + счётчик (12111, V12111, M12112)."""
+def next_lesson_id(title: str | None = None, tutor: str = "",
+                   sh_id: str | None = None, day: dt.date | None = None) -> str:
+    """ID занятия по владельцу и дате с учётом уже занятых номеров."""
+    import workspaces
+
     if sh_id is None or title is None:
         default_book, default_title = _target(tutor)
         sh_id = sh_id or default_book
         title = title or default_title
-    series = tutor_id_prefix(tutor)
-    prefix = series + id_prefix()
-    mx = 0
-    for lid in _fresh_series_ids(sh_id, title, bool(series)):
-        if not lid.startswith(prefix):
-            continue
-        suffix = lid[len(prefix):]
-        if suffix.isdigit():
-            mx = max(mx, int(suffix))
-    return prefix + str(mx + 1)
+    series = "A" if title == "Чеки" else workspaces.record_owner_prefix(tutor)
+    used = _fresh_series_ids(sh_id, title, series in ("M", "V"))
+    return next_record_id(series + "L", day or dt.date.today(), used)
 
 
 def next_lesson_id_old(title: str | None = None) -> int:
@@ -363,7 +360,7 @@ def append_check(record: dict) -> int:
     with _ID_LOCK:
         ensure_target_sheet(title, sh_id)
         row_num = find_next_free_row(title, sh_id)
-        lid = str(next_lesson_id(title, tutor, sh_id))
+        lid = next_lesson_id(title, tutor, sh_id, _parse_day(values[0][1]))
         values[0].append(lid)
         # Устанавливаем статус на пустой строке до записи. При отказе
         # API повторное подтверждение не создаст второе занятие.
@@ -481,7 +478,11 @@ def _day_from_id(lesson_id: str) -> dt.date | None:
     Нужна, когда в строке пустая дата: занятие всё равно должно
     попадать в бота, а не пропадать из списков.
     """
-    lid = str(lesson_id or "").strip()
+    lid = legacy_record_id(lesson_id, "L")
+    if lid[:2] in ("AL", "DL", "ML", "VL") and lid[2:].isdigit():
+        lid = lid[2:]
+    if lid[:1] in ("M", "V") and lid[1:].isdigit():
+        lid = lid[1:]
     if len(lid) < 5 or not lid[:4].isdigit():
         return None
     day, month = int(lid[:2]), int(lid[2:4])
@@ -1028,148 +1029,52 @@ def global_max_id() -> int:
     return mx
 
 
-def ensure_personal_ids() -> int:
-    """Проставить ID строкам «Занятия» в личных таблицах (V… / M…).
-
-    Репетиторы могут вписать занятие в таблицу руками — тогда ID пустой.
-    Здесь он появляется сам: у Вики с буквой V, у Максима с буквой M.
-    """
-    added = 0
-    try:
-        import workspaces as _ws
-    except Exception as e:  # noqa: BLE001
-        log(f"ID личных таблиц: {e}")
-        return 0
-    for tutor, sid in _ws.WORKSPACES.items():
-        letter = tutor_id_prefix(tutor)
-        if not letter:
-            continue
-        title = _ws.WORKSPACE_LESSONS_SHEET
-        try:
-            rows = get_values(sid, f"'{title}'!A1:L")
-        except Exception as e:  # noqa: BLE001
-            log(f"ID: не прочитал {tutor}: {e}")
-            continue
-        if not rows:
-            continue
-        # занятые ID этой таблицы
-        used: set[str] = set()
-        for r in rows[1:]:
-            lid = str(r[11]).strip() if len(r) > 11 else ""
-            if lid:
-                used.add(lid)
-        for n, row in enumerate(rows):
-            if n == 0:
-                continue
-            cur = str(row[11]).strip() if len(row) > 11 else ""
-            if cur:
-                continue
-            has_data = len(row) >= 4 and (str(row[2]).strip() or str(row[3]).strip())
-            if not has_data:
-                continue
-            d = _parse_day(row[1]) if len(row) > 1 else None
-            base = (f"{letter}{d.day}{d.month:02d}" if isinstance(d, dt.date)
-                    else f"{letter}{id_prefix()}")
-            mx = 0
-            for lid in used:
-                if lid.startswith(base) and lid[len(base):].isdigit():
-                    mx = max(mx, int(lid[len(base):]))
-            cand = base + str(mx + 1)
-            while cand in used:
-                mx += 1
-                cand = base + str(mx + 1)
+def _fill_missing_lesson_ids(sh_id: str, title: str, series: str, first_row: int) -> int:
+    """Присваивать ID пустым строкам по той же схеме, что при записи из бота."""
+    with _ID_LOCK:
+        rows = get_values(sh_id, f"'{title}'!A1:L", fresh=True)
+        pending = [(n, row) for n, row in enumerate(rows, start=1)
+                   if n >= first_row and len(row) >= 4 and not _cell(row, 11)
+                   and (_cell(row, 2) or _cell(row, 3))]
+        if not pending:
+            return 0
+        used = set(_fresh_series_ids(sh_id, title, series in ("M", "V")))
+        added = 0
+        for n, row in pending:
+            day = _parse_day(row[1]) or dt.date.today()
+            candidate = next_record_id(series + "L", day, used)
             try:
-                update_values(sid, f"'{title}'!L{n + 1}", [[cand]])
-                used.add(cand)
-                added += 1
-            except Exception as e:  # noqa: BLE001
-                log(f"ID: не записал {tutor} стр.{n + 1}: {e}")
-    if added:
-        invalidate_cache()
-        log(f"ID добавлены в личные таблицы: {added}")
+                update_values(sh_id, f"'{title}'!L{n}", [[candidate]])
+            except Exception as error:  # noqa: BLE001
+                log(f"Не удалось заполнить ID занятия в строке {n}: {type(error).__name__}")
+                continue
+            used.add(candidate)
+            added += 1
+        if added:
+            invalidate_cache()
+        return added
+
+
+def ensure_personal_ids() -> int:
+    """Заполнить пустые ID занятий в личных таблицах."""
+    import workspaces
+
+    added = 0
+    for tutor, book in workspaces.WORKSPACES.items():
+        try:
+            added += _fill_missing_lesson_ids(
+                book, workspaces.WORKSPACE_LESSONS_SHEET,
+                workspaces.record_owner_prefix(tutor), first_row=2,
+            )
+        except Exception as error:  # noqa: BLE001
+            log(f"Не удалось заполнить ID в личной таблице: {type(error).__name__}")
     return added
 
 
 def ensure_checks_ids() -> int:
-    """Проставить ID (колонка L) строкам «Чеки Репет» / «Чеки».
-
-    ID уникальны по всем листам: счётчик продолжает существующие номера,
-    а занятый ID никогда не выдаётся повторно.
-    """
-    cfg = load_config()
-    sh_id = cfg["sheets"]["recept"]
-    title = cfg["sheets"]["recept_checks_sheet"]
-    try:
-        rows = get_values(sh_id, f"'{title}'!A1:L")
-    except Exception:  # noqa: BLE001
-        return 0
-    if not rows:
-        return 0
-
-    # все уже занятые ID (по всем листам) и максимум по префиксам
-    used: set[str] = set()
-    max_by_prefix: dict[str, int] = {}
-    try:
-        for _sh, _t in _all_sheet_targets():
-            try:
-                vals = get_values(_sh, f"'{_t}'!A1:L")
-            except Exception:  # noqa: BLE001
-                continue
-            for r in vals[1:]:
-                lid = str(r[11]).strip() if len(r) > 11 else ""
-                if not lid or lid == "ID занятия":
-                    continue
-                used.add(lid)
-                pre = lid[:-1] if lid[-1].isdigit() else ""
-                # префикс — цифры даты DDMM перед счётчиком
-                pass
-    except Exception as e:  # noqa: BLE001
-        log(f"ID: не собрал занятые номера: {e}")
-
-    def _max_counter(prefix: str) -> int:
-        mx = 0
-        for lid in used:
-            if lid.startswith(prefix) and lid[len(prefix):].isdigit():
-                mx = max(mx, int(lid[len(prefix):]))
-        return mx
-
-    counters: dict[str, int] = {}
-
-    def _next_id(prefix: str) -> str:
-        if prefix not in counters:
-            counters[prefix] = _max_counter(prefix)
-        while True:
-            counters[prefix] += 1
-            cand = prefix + str(counters[prefix])
-            if cand not in used:
-                used.add(cand)
-                return cand
-
-    today_prefix = id_prefix()
-    added = 0
-    failed = 0
-    # Первые две строки — заголовок и защищённый пример.
-    for n, row in enumerate(rows[2:], start=2):
-        cur = str(row[11]).strip() if len(row) > 11 else ""
-        if cur:
-            continue
-        has_data = len(row) >= 4 and (str(row[2]).strip() or str(row[3]).strip())
-        if not has_data:
-            continue
-        row_prefix = today_prefix
-        d = _parse_day(row[1]) if len(row) > 1 else None
-        if isinstance(d, dt.date):
-            row_prefix = f"{d.day}{d.month:02d}"
-        try:
-            update_values(sh_id, f"'{title}'!L{n + 1}", [[_next_id(row_prefix)]])
-            added += 1
-        except Exception:  # noqa: BLE001
-            failed += 1
-    if added:
-        invalidate_cache()
-        log(f"ID добавлены в «{title}»: {added}"
-            + (f" (не удалось из-за защиты: {failed})" if failed else ""))
-    return added
+    """Заполнить пустые ID в «Чеках», пропуская защищённый пример."""
+    cfg = load_config()["sheets"]
+    return _fill_missing_lesson_ids(cfg["recept"], cfg["recept_checks_sheet"], "A", first_row=3)
 
 
 def renumber_all_ids() -> dict[str, int]:
