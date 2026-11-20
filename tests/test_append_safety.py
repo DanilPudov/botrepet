@@ -1,3 +1,4 @@
+import datetime as dt
 from unittest.mock import MagicMock
 
 import pytest
@@ -10,7 +11,6 @@ def test_id_ignores_cache_and_refuses_partial_book(monkeypatch):
     api = MagicMock()
     monkeypatch.setattr(sheets_util, "sheets", lambda: api)
     monkeypatch.setattr(cw, "tutor_id_prefix", lambda name: "")
-    monkeypatch.setattr(cw, "id_prefix", lambda: "1911")
     monkeypatch.setattr(cw, "load_config", lambda: {"sheets": {
         "history": "hist", "recept": "checks", "recept_checks_sheet": "Чеки"}})
     monkeypatch.setattr(cw, "_IDS_CACHE", {"ts": float("inf"), "ids": ["191199"]})
@@ -18,13 +18,13 @@ def test_id_ignores_cache_and_refuses_partial_book(monkeypatch):
     sheet.get.return_value.execute.return_value = {
         "sheets": [{"properties": {"title": "История"}}, {"properties": {"title": "История 2"}}]}
     results = sheet.values.return_value.batchGet.return_value.execute
-    checks = {"valueRanges": [{"range": "Чеки!L2:L10", "values": [["19112"]]}]}
+    checks = {"valueRanges": [{"range": "Чеки!L2:L10", "values": [["AL191101"]]}]}
     history = {"valueRanges": [{"range": "История!L2:L10"}, {
-        "range": "'История 2'!L2:L10", "values": [["19118"]]}]}
+        "range": "'История 2'!L2:L10", "values": [["AL191102"]]}]}
     results.side_effect = [checks, history, checks, {"valueRanges": [history["valueRanges"][0]]}]
-    assert cw.next_lesson_id("Чеки", "Test", "checks") == "19119"
+    assert cw.next_lesson_id("Чеки", "Test", "checks", dt.date(2026, 11, 19)) == "AL191103"
     with pytest.raises(RuntimeError, match="не полностью"):
-        cw.next_lesson_id("Чеки", "Test", "checks")
+        cw.next_lesson_id("Чеки", "Test", "checks", dt.date(2026, 11, 19))
 
 
 def test_failed_read_does_not_select_an_occupied_row(monkeypatch):
