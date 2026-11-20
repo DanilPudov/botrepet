@@ -5,6 +5,8 @@
 """
 from __future__ import annotations
 
+import datetime as dt
+
 from sheets_util import load_config, norm_name
 
 # Личные листы внутри главной таблицы (для тех, у кого нет своей)
@@ -166,45 +168,27 @@ def is_family(tutor: str) -> bool:
     return is_full_pay(tutor)
 
 
-PERIOD_ANCHOR_DAY = 11   # период считаем с 11-го числа
-
-
-def _anchor_start(today) -> "dt.date":
-    """Начало текущего периода: ближайшее 11-е число не позже today."""
-    import datetime as _dt
-    if today.day >= PERIOD_ANCHOR_DAY:
-        return _dt.date(today.year, today.month, PERIOD_ANCHOR_DAY)
-    year, month = today.year, today.month - 1
-    if month == 0:
-        year, month = year - 1, 12
-    return _dt.date(year, month, PERIOD_ANCHOR_DAY)
+# Понедельник согласованного периода 09–22 ноября 2026 года.
+FORTNIGHT_ANCHOR = dt.date(2026, 11, 9)
 
 
 def period_bounds(tutor: str, today=None) -> tuple:
-    """Границы текущего периода (start, end) с учётом длины у репетитора.
-
-    Семидневный период — календарная неделя с понедельника.
-    Двухнедельные периоды отсчитываются с 11-го числа месяца.
-    """
-    import datetime as _dt
-    today = today or _dt.date.today()
+    """Текущий период из одной или двух полных календарных недель."""
+    today = today or dt.date.today()
     span = week_span(tutor)
     if span == 7:
-        start = today - _dt.timedelta(days=today.weekday())
+        elapsed = today.weekday()
     else:
-        anchor = _anchor_start(today)
-        elapsed = (today - anchor).days
-        start = anchor + _dt.timedelta(days=(elapsed // span) * span)
-    return start, start + _dt.timedelta(days=span - 1)
+        elapsed = (today - FORTNIGHT_ANCHOR).days % span
+    start = today - dt.timedelta(days=elapsed)
+    return start, start + dt.timedelta(days=span - 1)
 
 
 def past_period_bounds(tutor: str, today=None) -> tuple:
     """Границы прошедшего периода — ровно перед текущим."""
-    import datetime as _dt
-    today = today or _dt.date.today()
     cur_start, _ = period_bounds(tutor, today)
-    end = cur_start - _dt.timedelta(days=1)
-    start = end - _dt.timedelta(days=week_span(tutor) - 1)
+    end = cur_start - dt.timedelta(days=1)
+    start = end - dt.timedelta(days=week_span(tutor) - 1)
     return start, end
 
 
