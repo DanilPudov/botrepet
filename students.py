@@ -61,13 +61,13 @@ def ensure_sheet(tutor: str = "") -> str:
     return title
 
 
-def _rows(tutor: str = "") -> list[list[str]]:
+def _rows(tutor: str = "", *, fresh: bool = False) -> list[list[str]]:
     try:
         ensure_sheet(tutor)
     except Exception as e:  # noqa: BLE001 — лист создастся при записи
         log(f"Не смог подготовить лист «{sheet_title()}»: {e}")
     return sheets_util.get_values(
-        workspaces.spreadsheet_for(tutor), f"'{sheet_title()}'!A1:{_LAST_COL}")
+        workspaces.spreadsheet_for(tutor), f"'{sheet_title()}'!A1:{_LAST_COL}", fresh=fresh)
 
 
 def _cell(row: list[str], idx: int) -> str:
@@ -212,80 +212,59 @@ def ensure_student_ids(tutor: str = "") -> int:
     Старым строкам (записанным до появления колонки J) ID ставится
     один раз. Префикс определяется по репетитору из колонки A строки.
     """
-    sh_id = workspaces.spreadsheet_for(tutor)
-    try:
-        rows = _rows(tutor)
-    except Exception as e:  # noqa: BLE001
-        log(f"Не смог назначить ID учеников: {e}")
-        return 0
-    if not rows:
-        return 0
-    # сколько уже занято под каждый префикс
-    counters: dict[str, int] = {}
-    for r in rows[1:]:
-        sid = str(_cell(r, I_STUDENT_ID)).strip()
-        if not sid:
-            continue
-        for pfx_len in range(1, len(sid) + 1):
-            if sid[pfx_len:].isdigit():
-                pfx = sid[:pfx_len]
-                counters[pfx] = max(counters.get(pfx, 0), int(sid[pfx_len:]))
-                break
-    written = 0
-    for n, r in enumerate(rows, start=1):
-        if n == 1 or not any(str(x).strip() for x in r):
-            continue
-        if str(_cell(r, I_STUDENT_ID)).strip():
-            continue
-        row_tutor = str(_cell(r, 0)).strip() or tutor
-        prefix = student_id_prefix(row_tutor)
-        counters[prefix] = counters.get(prefix, 0) + 1
-        sheets_util.update_values(
-            sh_id, f"'{sheet_title()}'!J{n}", [[f"{prefix}{counters[prefix]}"]])
-        written += 1
-    if written:
-        invalidate_students_cache()
-        log(f"УЧЕНИКИ: назначено ID {written} в таблице {sh_id}")
-    return written
+    with sheets_util.RECORD_ID_LOCK:
+        sh_id = workspaces.spreadsheet_for(tutor)
+        try:
+            rows = _rows(tutor, fresh=True)
+        except Exception as e:  # noqa: BLE001
+            log(f"Не смог назначить ID учеников: {e}")
+            return 0
+        if not rows:
+            return 0
+        used = {_cell(row, I_STUDENT_ID) for row in rows[1:]}
+        written = 0
+        for n, row in enumerate(rows[1:], start=2):
+            if not any(str(value).strip() for value in row) or str(_cell(row, I_STUDENT_ID)).strip():
+                continue
+            owner = str(_cell(row, 0)).strip() or tutor
+            try:
+                day = dt.datetime.strptime(str(_cell(row, 4)), "%d.%m.%Y").date()
+            except ValueError:
+                day = dt.date.today()
+            prefix = workspaces.record_owner_prefix(owner) + "P"
+            candidate = sheets_util.next_record_id(prefix, day, used)
+            sheets_util.update_values(sh_id, f"'{sheet_title()}'!J{n}", [[candidate]])
+            used.add(candidate)
+            written += 1
+        if written:
+            invalidate_students_cache()
+            log(f"УЧЕНИКИ: назначено ID {written} в таблице {sh_id}")
+        return written
 
 
 def add_student(tutor: str, student: str, parent: str = "", rate: str = "",
                 comment: str = "", student_link: str = "",
                 parent_link: str = "", sender: str = "") -> int:
     """Добавляет ученика. Возвращает номер строки."""
-    ensure_sheet(tutor)
-    cfg = load_config()
-    sh_id = workspaces.spreadsheet_for(tutor)
-    rows = _rows(tutor)
-    last = 1
-    for n, row in enumerate(rows, start=1):
-        if any(str(x).strip() for x in row):
-            last = n
-    row_num = last + 1
-    prefix = student_id_prefix(tutor)
-    used = {s.get("id") for s in students_of(tutor) if s.get("id")}
-    mx = 0
-    for u in used:
-        u = str(u)
-        tail = u[len(prefix):] if u.startswith(prefix) else ""
-        if tail.isdigit():
-            mx = max(mx, int(tail))
-        elif u.startswith("S") and u[1:].isdigit():
-            mx = max(mx, int(u[1:]))
-    new_id = ""
-    while True:
-        mx += 1
-        cand = f"{prefix}{mx}"
-        if cand not in used:
-            new_id = cand
-            break
-    sheets_util.update_values(
-        sh_id, f"'{sheet_title()}'!A{row_num}:{_LAST_COL}{row_num}",
-        [[tutor, student, parent, rate, dt.date.today().strftime("%d.%m.%Y"),
-          comment, student_link, parent_link, sender, new_id]])
-    log(f"УЧЕНИК добавлен строка {row_num}: {tutor} — {student} ({parent})")
-    invalidate_students_cache()
-    return row_num
+    with sheets_util.RECORD_ID_LOCK:
+        ensure_sheet(tutor)
+        sh_id = workspaces.spreadsheet_for(tutor)
+        rows = _rows(tutor, fresh=True)
+        last = 1
+        for n, row in enumerate(rows, start=1):
+            if any(str(x).strip() for x in row):
+                last = n
+        row_num = last + 1
+        day = dt.date.today()
+        prefix = workspaces.record_owner_prefix(tutor) + "P"
+        new_id = sheets_util.next_record_id(prefix, day, (_cell(row, I_STUDENT_ID) for row in rows[1:]))
+        sheets_util.update_values(
+            sh_id, f"'{sheet_title()}'!A{row_num}:{_LAST_COL}{row_num}",
+            [[tutor, student, parent, rate, dt.date.today().strftime("%d.%m.%Y"),
+              comment, student_link, parent_link, sender, new_id]])
+        log(f"УЧЕНИК добавлен строка {row_num}: {tutor} — {student} ({parent})")
+        invalidate_students_cache()
+        return row_num
 
 
 def find_student(tutor: str, student: str,
