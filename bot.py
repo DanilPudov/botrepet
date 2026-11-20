@@ -4669,8 +4669,7 @@ def _note_brief(note: str) -> str:
 async def notify_update(context_or_app) -> None:
     """Запомнить уведомление об обновлении, но НЕ рассылать сразу.
 
-    Рассылка идёт, когда репетитор сам нажмёт любую кнопку или напишет —
-    чтобы не отвлекать людей без повода.
+    Данил Пудов получит уведомление при следующем действии в боте.
     """
     import hashlib
 
@@ -4727,45 +4726,33 @@ async def notify_update(context_or_app) -> None:
         pass
 
 
+UPDATE_NOTE_RECIPIENT_ID = 793935902  # Данил Пудов
+
+
 async def _maybe_send_note(bot_obj, user_id) -> None:
-    """Отправить отложенное уведомление этому пользователю (один раз)."""
+    """Отправить отложенное уведомление Данилу Пудову один раз."""
+    if str(user_id) != str(UPDATE_NOTE_RECIPIENT_ID):
+        return
     try:
         st = load_state()
         note = st.get("pending_note") or {}
         text = (note.get("text") or "").strip()
         if not text:
             return
-        sent = [str(x) for x in (note.get("sent") or [])]
-        uid = str(user_id)
-        if uid in sent:
-            return
-        cfg = load_config()
-        # уведомления об обновлении — только главному владельцу
-        allowed: set[str] = set()
-        for oid in (cfg.get("note_recipients")
-                    or [cfg.get("owner_ids", [793935902])[0]]):
-            try:
-                allowed.add(str(int(oid)))
-            except (ValueError, TypeError):
-                continue
-        if uid not in allowed:
+        sent = {str(x) for x in (note.get("sent") or [])}
+        if str(UPDATE_NOTE_RECIPIENT_ID) in sent:
             return
         await bot_obj.send_message(
-            chat_id=int(user_id), text=text,
+            chat_id=UPDATE_NOTE_RECIPIENT_ID, text=text,
             reply_markup=kb([[("Отлично", "dismiss")]], home=False))
-        sent.append(uid)
-        note["sent"] = sent
-        st["pending_note"] = note
+        st.pop("pending_note", None)
         save_state(st)
-        log(f"Уведомление об обновлении отправлено {user_id}")
-        if allowed <= set(sent):
-            st.pop("pending_note", None)
-            save_state(st)
-            try:
-                (sheets_util.DATA_DIR / "update_note.sent").write_text(
-                    note.get("digest", ""), encoding="utf-8")
-            except OSError:
-                pass
+        log(f"Уведомление об обновлении отправлено {UPDATE_NOTE_RECIPIENT_ID}")
+        try:
+            (sheets_util.DATA_DIR / "update_note.sent").write_text(
+                note.get("digest", ""), encoding="utf-8")
+        except OSError:
+            pass
     except Exception as e:  # noqa: BLE001
         log(f"Не смог отправить отложенное уведомление: {e}")
 
