@@ -1043,12 +1043,12 @@ def _fill_missing_lesson_ids(sh_id: str, title: str, series: str, first_row: int
         for n, row in pending:
             day = _parse_day(row[1]) or dt.date.today()
             candidate = next_record_id(series + "L", day, used)
+            used.add(candidate)
             try:
                 update_values(sh_id, f"'{title}'!L{n}", [[candidate]])
             except Exception as error:  # noqa: BLE001
                 log(f"Не удалось заполнить ID занятия в строке {n}: {type(error).__name__}")
                 continue
-            used.add(candidate)
             added += 1
         if added:
             invalidate_cache()
