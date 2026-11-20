@@ -87,6 +87,12 @@ def canon_tutor(name: str) -> str:
     return n
 
 
+def record_owner_prefix(tutor: str) -> str:
+    """Буква владельца: общие записи A, личные D, M и V."""
+    return {"Данил Пудов": "D", "Максим Пудов": "M",
+            "Виктория Пудова": "V"}.get(canon_tutor(tutor), "A")
+
+
 def workspace_id(tutor: str) -> str | None:
     """ID личной таблицы репетитора (None — работает в главной)."""
     t = canon_tutor(tutor)
