@@ -346,8 +346,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     role = role_of(user.id)
     if role is None:
         # пишем в лог: организатору видно, кто просит доступ
-        log(f"Запрос доступа: id={user.id} "
-            f"имя={user.first_name or ''} @{user.username or ''}")
+        log("Получен запрос на доступ")
         await update.message.reply_text(
             "🔒 Нет доступа.\n\nОбратитесь к организатору, чтобы вас добавили. "
             "Сообщите ему свой ID: `" + str(user.id) + "`.",
@@ -3355,13 +3354,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 log(f"CUSTOM_EMOJI id={getattr(ent, 'custom_emoji_id', '')}")
     except Exception:  # noqa: BLE001
         pass
-    # журнал всех входящих сообщений — чтобы ничего не терялось
-    try:
-        with open(str(sheets_util.DATA_DIR / "messages.log"), "a", encoding="utf-8") as f:
-            f.write(f"{dt.datetime.now():%d.%m.%Y %H:%M:%S} | "
-                    f"id={user.id} | {display_name(user.id) or ''} | {text}\n")
-    except Exception:  # noqa: BLE001
-        pass
     await _delete_prev(update, context)
     await _delete_user_msg(update, context)
     p = get_pending(user.id)
@@ -4492,7 +4484,7 @@ async def send_reminder(context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=kb([[("📝 Записать занятие", "new")]]),
             )
         except Exception as e:  # noqa: BLE001
-            log(f"Напоминание {t.get('name')} не доставлено: {e}")
+            log(f"Напоминание не доставлено: {type(e).__name__}")
 
 
 def _sheet_of(lesson_id: str) -> str | None:
@@ -4641,8 +4633,7 @@ async def reschedule_reminders(context: ContextTypes.DEFAULT_TYPE):
             data={"entry": entry, "date": day.strftime("%d.%m.%Y"),
                   "chat_id": chat_id, "key": key},
             name=f"remind-{key}")
-        log(f"Напоминание запланировано: {entry.get('ученик')} "
-            f"{day:%d.%m} {entry.get('время')} -> в {fire_at:%d.%m %H:%M}")
+        log("Напоминание запланировано")
 
 
 def _chat_id_by_tutor(tutor: str) -> int | None:
@@ -4734,7 +4725,7 @@ async def _maybe_send_note(bot_obj, user_id) -> None:
         if note.get("build"):
             st["last_update_build"] = note["build"]
         save_state(st)
-        log(f"Уведомление об обновлении отправлено {UPDATE_NOTE_RECIPIENT_ID}")
+        log("Уведомление об обновлении отправлено")
     except Exception as e:  # noqa: BLE001
         log(f"Не смог отправить отложенное уведомление: {e}")
 
@@ -4744,7 +4735,7 @@ async def _ensure_accounts() -> None:
     try:
         added = _ws.ensure_tutors(load_state, save_state)
         if added:
-            log(f"Зарегистрированы аккаунты: {', '.join(added)}")
+            log(f"Зарегистрировано аккаунтов: {len(added)}")
     except Exception as e:  # noqa: BLE001
         log(f"Не удалось зарегистрировать аккаунты: {e}")
 
@@ -4935,12 +4926,7 @@ async def _on_error(update, context) -> None:
                     "⚠️ Google сейчас не отвечает. Попробуйте через минуту.")
         except Exception:  # noqa: BLE001
             pass
-    try:
-        user_id = getattr(update, "effective_user", None)
-        who = user_id.id if user_id else "?"
-    except Exception:  # noqa: BLE001
-        who = "?"
-    log(f"ОШИБКА у {who}: {type(err).__name__}: {text[:300]}")
+    log(f"Ошибка обработки: {type(err).__name__}")
 
 
 def _single_instance() -> None:
