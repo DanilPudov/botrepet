@@ -183,13 +183,16 @@ def _anchor_start(today) -> "dt.date":
 def period_bounds(tutor: str, today=None) -> tuple:
     """Границы текущего периода (start, end) с учётом длины у репетитора.
 
-    Период начинается 11-го числа, длина — week_span(tutor).
+    Отсчёт периодов начинается 11-го числа, длина — week_span(tutor).
     Например 18.11 при 14 днях: 11.11 – 24.11.
     """
     import datetime as _dt
     today = today or _dt.date.today()
-    start = _anchor_start(today)
-    return start, start + _dt.timedelta(days=week_span(tutor) - 1)
+    anchor = _anchor_start(today)
+    span = week_span(tutor)
+    elapsed = (today - anchor).days
+    start = anchor + _dt.timedelta(days=(elapsed // span) * span)
+    return start, start + _dt.timedelta(days=span - 1)
 
 
 def past_period_bounds(tutor: str, today=None) -> tuple:
