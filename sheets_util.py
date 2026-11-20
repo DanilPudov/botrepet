@@ -103,6 +103,29 @@ def configure_logging() -> None:
     logging.basicConfig(handlers=[handler], level=logging.WARNING, force=True)
 
 
+RECORD_ID_LOCK = threading.RLock()
+
+
+def next_record_id(prefix: str, day: dt.date, existing) -> str:
+    """Выдать уникальный номер для двух букв и календарной даты."""
+    stem = f"{prefix}{day:%d%m}"
+    used = {str(value).strip().upper() for value in existing}
+    for number in range(1, 100):
+        if stem + str(number) in used or stem + f"{number:02d}" in used:
+            continue
+        return stem + f"{number:02d}"
+    raise ValueError(f"Для {stem} уже заняты все 99 номеров.")
+
+
+def legacy_record_id(record_id, kind: str) -> str:
+    """Старый ID, сохранённый в конце префиксного ID при переносе."""
+    value = str(record_id or "").strip()
+    match = re.fullmatch(r"[ADMV]([LPSC])-[A-Z0-9]+-[A-Z0-9]+-([A-Za-z0-9]+)", value)
+    if match and match.group(1) == kind:
+        return match.group(2)
+    return value
+
+
 def log(msg: str) -> None:
     msg = _LOG_SECRET.sub("[скрыто]", msg)
     line = f"{dt.datetime.now():%Y-%m-%d %H:%M:%S} {msg}"
