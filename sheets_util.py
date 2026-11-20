@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import re
 import datetime as dt
 import threading
 from http.client import IncompleteRead
@@ -83,7 +84,14 @@ def save_state(state: dict) -> None:
         tmp.replace(STATE_PATH)
 
 
+_LOG_SECRET = re.compile(
+    r"\b(?:\d{7,12}:[A-Za-z0-9_-]{25,}|gh[pousr]_[A-Za-z0-9_]{20,}"
+    r"|github_pat_[A-Za-z0-9_]{20,}|ya29\.[A-Za-z0-9_-]+)"
+)
+
+
 def log(msg: str) -> None:
+    msg = _LOG_SECRET.sub("[скрыто]", msg)
     line = f"{dt.datetime.now():%Y-%m-%d %H:%M:%S} {msg}"
     print(line, flush=True)
     try:
