@@ -55,11 +55,11 @@ def _rows_for(tutor: str) -> list[list[str]]:
     try:
         ensure_sheet(tutor)
     except Exception as e:  # noqa: BLE001
-        log(f"Не смог подготовить лист «{SHEET}» для {tutor}: {e}")
+        log(f"Не смог подготовить лист расписания: {type(e).__name__}")
     try:
         return sheets_util.get_values(sheet_for(tutor), f"'{SHEET}'!A1:I")
     except Exception as e:  # noqa: BLE001
-        log(f"Не прочитал расписание {tutor}: {e}")
+        log(f"Не прочитал расписание: {type(e).__name__}")
         return []
 
 
@@ -110,7 +110,7 @@ def _rows_all() -> list[list[str]]:
                 for row in sheets_util.get_values(sid, f"'{SHEET}'!A1:I"):
                     out.append((sid, row))
             except Exception as e:  # noqa: BLE001
-                log(f"Не прочитал расписание {_tutor}: {e}")
+                log(f"Не прочитал личное расписание: {type(e).__name__}")
     except Exception as e:  # noqa: BLE001
         log(f"Личные расписания не прочитаны: {e}")
     return out
@@ -210,7 +210,7 @@ def add_cancel(tutor: str, student: str, day: dt.date, time_str: str) -> str:
         ensure_cancel_sheet(sh_id, tutor)
         rid, record = _cancel_record(tutor, student, day, time_str)
         sheets_util.update_values(sh_id, record["range"], record["values"])
-        log(f"ОТМЕНА: {tutor} — {student} {day:%d.%m} {time_str}")
+        log("Отмена занятия записана")
         return rid
 
 
@@ -253,7 +253,7 @@ def remove_cancel(tutor: str, day: dt.date, time_str: str) -> bool:
             except Exception as e:  # noqa: BLE001
                 log(f"Не удалось снять отмену: {e}")
                 return False
-            log(f"ОТМЕНА снята: {tutor} {day:%d.%m} {time_str}")
+            log("Отмена занятия снята")
             return True
     return False
 
@@ -386,7 +386,7 @@ def add_entry(tutor: str, student: str, parent: str, days: str, time_str: str,
         sheets_util.update_values(
             sh_id, f"'{SHEET}'!A{row_num}:I{row_num}",
             [[str(rid), tutor, student, parent, days, time_str, price, "да", ""]])
-        log(f"РАСПИСАНИЕ добавлено id={rid}: {tutor} — {student} {days} {time_str}")
+        log("Запись добавлена в расписание")
         return rid
 
 
