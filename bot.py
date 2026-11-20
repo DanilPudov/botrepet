@@ -4157,7 +4157,6 @@ async def show_mine_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     user = update.effective_user
     tutor = name_by_id(user.id) or ""
     today = dt.date.today()
-    # период начинается 11-го числа, длина зависит от репетитора
     week_start, week_end = _ws.period_bounds(tutor, today)
     try:
         all_lessons = checks_writer.read_lessons(with_checks=True)
