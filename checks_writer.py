@@ -828,8 +828,20 @@ def _color_to_status(r: float, g: float, b: float) -> str:
     return ""
 
 
-def lesson_flags() -> dict[str, str]:
-    """{id занятия: 'paid'|'no'|''} по цвету суммы (колонка F).
+LessonFlags = dict[tuple[str, str, str], str]
+
+
+def lesson_payment_status(lesson: dict, flags: LessonFlags) -> str:
+    """Статус записи из исходной книги и листа."""
+    return flags.get(
+        (lesson.get("spreadsheet_id", ""), lesson.get("sheet_title", ""),
+         str(lesson.get("id") or "").strip()),
+        "",
+    )
+
+
+def lesson_flags() -> LessonFlags:
+    """Цвет суммы (F) по ключу (книга, лист, ID занятия).
 
     На каждый лист — один запрос и только нужные колонки (F и L),
     а не весь диапазон A1:L. Результат кэшируется на 25 секунд.
@@ -843,7 +855,7 @@ def lesson_flags() -> dict[str, str]:
     recept_id = cfg["sheets"]["recept"]
     checks_title = cfg["sheets"]["recept_checks_sheet"]
 
-    out: dict[str, str] = {}
+    out: LessonFlags = {}
     fields = ("sheets(data(rowData(values("
               "formattedValue,effectiveFormat/textFormat/foregroundColor))))")
 
@@ -891,20 +903,11 @@ def lesson_flags() -> dict[str, str]:
                 if sc:
                     fg = ((sc[0].get("effectiveFormat") or {})
                           .get("textFormat", {}).get("foregroundColor"))
-            if not fg:
-                out.setdefault(lid, "")
-                continue
+            fg = fg or {}
             r = float(fg.get("red", 0))
             g = float(fg.get("green", 0))
             b = float(fg.get("blue", 0))
-            status = _color_to_status(r, g, b)
-            # Ключ — (лист, ID): одинаковый ID в разных листах не должен
-            # перекрывать статус. Плоский ключ оставляем для совместимости.
-            out[(title, lid)] = status
-            if lid in out and out[lid] != status:
-                out[lid] = ""      # разные листы дают разный цвет — неизвестно
-            else:
-                out[lid] = status
+            out[(sh_id, title, lid)] = _color_to_status(r, g, b)
 
     try:
         meta = sheets().spreadsheets().get(spreadsheetId=hist_id).execute()
