@@ -44,6 +44,7 @@ from sheets_util import (  # noqa: E402
     save_state,
     get_values,
     update_values,
+    update_values_batch,
     clear_values,
     sheets,
     log,
@@ -222,7 +223,9 @@ def checks_rows(start: dt.date) -> list[dict]:
             student += f" ({values['родитель']})"
         entry = {key: values.get(key, "") for key in
                  ("время", "комментарий", "первое", "как_прошло", "будут", "комиссия")}
-        entry.update(row=n, дата=day, репетитор=tutor, ученик=student, сумма=amount)
+        lesson_id = values.get("id") or (str(row[11]).strip() if len(row) > 11 else "")
+        entry.update(row=n, дата=day, репетитор=tutor, ученик=student, сумма=amount,
+                     id=lesson_id)
         out.append(entry)
     return out
 
@@ -374,7 +377,7 @@ def insert_missing_rows(checks: list[dict], dry_run: bool = False) -> list[dict]
     cfg = load_config()
     sh_id = cfg["sheets"]["history"]
     title = cfg["sheets"]["history_sheet"]
-    all_rows = get_values(sh_id, f"'{title}'!A1:J")
+    all_rows = get_values(sh_id, f"'{title}'!A1:L")
     if not all_rows:
         return []
 
@@ -507,7 +510,16 @@ def insert_missing_rows(checks: list[dict], dry_run: bool = False) -> list[dict]
     fmt_reqs = []
     for item in plan:
         t = item["строка"]
-        update_values(sh_id, f"'{title}'!A{t}:J{t}", [_fmt_row(item["запись"])])
+        lesson = item["запись"]
+        row_range = f"'{title}'!A{t}:J{t}"
+        values = [_fmt_row(lesson)]
+        if lesson.get("id"):
+            update_values_batch(sh_id, [
+                {"range": row_range, "values": values},
+                {"range": f"'{title}'!L{t}", "values": [[lesson["id"]]]},
+            ])
+        else:
+            update_values(sh_id, row_range, values)
         fmt_reqs += [
             {"repeatCell": {
                 "range": {"sheetId": 0, "startRowIndex": t - 1, "endRowIndex": t,
