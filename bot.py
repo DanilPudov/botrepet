@@ -4936,6 +4936,9 @@ async def _on_error(update, context) -> None:
             return
     if err is None:
         return
+    if update is None and isinstance(err, NetworkError):
+        log(f"Сетевая ошибка Telegram в фоне: {text[:300]}")
+        return
     # Google недоступен (квота/сеть): раньше репетитор видел полную тишину
     if any(t in text for t in ("429", "quota", "SSL", "timed out",
                                "Connection", "502", "503", "504",
@@ -5081,8 +5084,11 @@ def main():
         app.job_queue.run_daily(reschedule_reminders, time=dt.time(hour=0, minute=10))
         app.job_queue.run_repeating(check_suggestions_job, interval=3600, first=90)
         app.job_queue.run_once(_warm_cache, when=1)
-        # кэш живёт 60 с — обновляем каждые 45 с, чтобы он не остывал
-        app.job_queue.run_repeating(refresh_cache_job, interval=180, first=120)
+        # Допускаем небольшую задержку запуска фонового обновления кэша.
+        app.job_queue.run_repeating(
+            refresh_cache_job, interval=180, first=120,
+            job_kwargs={"misfire_grace_time": 30},
+        )
 
     import hashlib as _hl
     try:
