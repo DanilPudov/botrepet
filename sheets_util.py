@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import datetime as dt
 import threading
@@ -85,9 +86,21 @@ def save_state(state: dict) -> None:
 
 
 _LOG_SECRET = re.compile(
-    r"\b(?:\d{7,12}:[A-Za-z0-9_-]{25,}|gh[pousr]_[A-Za-z0-9_]{20,}"
+    r"(?:(?<!\d)\d{7,12}:[A-Za-z0-9_-]{25,}|gh[pousr]_[A-Za-z0-9_]{20,}"
     r"|github_pat_[A-Za-z0-9_]{20,}|ya29\.[A-Za-z0-9_-]+)"
 )
+
+
+class _SecretMaskingFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        return _LOG_SECRET.sub("[скрыто]", super().format(record))
+
+
+def configure_logging() -> None:
+    """Маскировать секреты в сообщениях библиотек, включая трассировки."""
+    handler = logging.StreamHandler()
+    handler.setFormatter(_SecretMaskingFormatter("%(levelname)s %(name)s: %(message)s"))
+    logging.basicConfig(handlers=[handler], level=logging.WARNING, force=True)
 
 
 def log(msg: str) -> None:
