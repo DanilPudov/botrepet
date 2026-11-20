@@ -372,7 +372,7 @@ def append_check(record: dict) -> int:
                       value_input_option="USER_ENTERED")
         invalidate_cache()
 
-    log(f"CHECK записан в «{title}» строку {row_num}: {values[0]}")
+    log(f"Занятие записано в строку {row_num}")
     # цвет имени репетитора, если настроен
     try:
         _tcolor = get_tutor_color(tutor)
@@ -755,7 +755,7 @@ def set_tutor_color(tutor: str, color_text: str) -> tuple[bool, int]:
         str(color_text).strip()
     save_state(st)
     count = apply_tutor_color(tutor, color)
-    log(f"ЦВЕТ репетитора {tutor}: {color_text} (строк: {count})")
+    log(f"Цвет обновлён (строк: {count})")
     return True, count
 
 
@@ -1416,7 +1416,7 @@ def update_lesson(lesson_id: str, record: dict,
         str(lesson_id),
     ]]
     update_values(sh_id, f"'{sheet_title}'!A{row}:L{row}", values)
-    log(f"CHECK изменён id={lesson_id} ({sheet_title}) строка {row}")
+    log(f"Занятие изменено в строке {row}")
     invalidate_cache()
     return True
 
@@ -1436,7 +1436,7 @@ def delete_lesson(lesson_id: str, title: str | None = None) -> bool:
         return False
     sh_id, sheet_title, row = found
     clear_values(sh_id, f"'{sheet_title}'!A{row}:L{row}")
-    log(f"CHECK удалён id={lesson_id} ({sheet_title}) строка {row}")
+    log(f"Занятие удалено из строки {row}")
     invalidate_cache()
     return True
 
