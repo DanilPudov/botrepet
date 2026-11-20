@@ -39,13 +39,14 @@ def test_move_writes_only_dated_replacement_and_cancellation(monkeypatch):
     monkeypatch.setattr(schedule, "id_letter", lambda tutor: "")
     monkeypatch.setattr(schedule, "ensure_cancel_sheet", Mock())
     monkeypatch.setattr(schedule, "is_cancelled", lambda *a, **kw: False)
-    monkeypatch.setattr(schedule, "_rows", lambda tutor: [["ID"], ["1", "Тест"]])
-    monkeypatch.setattr(schedule, "_cancel_rows", lambda tutor: [["ID"]])
+    monkeypatch.setattr(schedule, "_rows", lambda tutor, **kw: [["ID"], ["1", "Тест"]])
+    monkeypatch.setattr(schedule, "_cancel_rows", lambda tutor, **kw: [["ID"]])
     batch = Mock()
     monkeypatch.setattr(schedule.sheets_util, "update_values_batch", batch)
-    assert schedule.move_occurrence(entry, day, "20:00") == "2"
+    assert schedule.move_occurrence(entry, day, "20:00") == "AS191101"
     book, (cancel, replacement) = batch.call_args.args
     assert book == "book"
+    assert cancel["values"][0][0] == "AC191101"
     assert cancel["values"][0][-2:] == ["19.11.2026", "18:00"]
     assert replacement["range"].endswith("A3:I3")
     assert replacement["values"][0][4:6] == ["19.11.2026", "20:00"]
