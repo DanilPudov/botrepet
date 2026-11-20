@@ -4666,64 +4666,47 @@ def _note_brief(note: str) -> str:
         b if len(b) <= 90 else b[:87] + "..." for b in bullets[:5])
 
 
-async def notify_update(context_or_app) -> None:
-    """Запомнить уведомление об обновлении, но НЕ рассылать сразу.
-
-    Данил Пудов получит уведомление при следующем действии в боте.
-    """
+def _build_version() -> str:
     import hashlib
 
-    candidates = [sheets_util.DATA_DIR / "update_note.txt",
-                  sheets_util.BASE_DIR / "update_note.txt"]
-    note_path = next((p for p in candidates if p.exists()), None)
-    if note_path is None:
-        return
+    digest = hashlib.sha1()
     try:
-        note = note_path.read_text(encoding="utf-8").strip()
-    except Exception as e:  # noqa: BLE001
-        log(f"Не прочитал update_note.txt: {e}")
-        return
-    if not note:
-        try:
-            note_path.unlink()
-        except OSError:
-            pass
-        return
+        for path in sorted(sheets_util.BASE_DIR.glob("*.py")):
+            digest.update(path.name.encode("utf-8"))
+            digest.update(path.read_bytes())
+    except OSError:
+        return "?"
+    return digest.hexdigest()[:8]
 
-    digest = hashlib.sha1(note.encode("utf-8")).hexdigest()[:16]
-    marker = sheets_util.DATA_DIR / "update_note.sent"
-    try:
-        if marker.exists() and marker.read_text(encoding="utf-8").strip() == digest:
-            log("Уведомление об обновлении уже разослано ранее")
+
+async def notify_update(app) -> None:
+    """Уведомить Данила о новой сборке и сохранить очередь на случай сбоя."""
+    build = _build_version()
+    if build != "?":
+        state = load_state()
+        if state.get("last_update_build") == build:
+            return
+        if (state.get("pending_note") or {}).get("build") != build:
+            note_path = sheets_util.DATA_DIR / "update_note.txt"
             try:
-                note_path.unlink()
+                note = _note_brief(note_path.read_text(encoding="utf-8-sig"))
+            except FileNotFoundError:
+                note = ""
+            except OSError as error:
+                log(f"Не прочитал update_note.txt: {error}")
+                note = ""
+
+            state["pending_note"] = {
+                "text": note or "🤖 Бот обновлён",
+                "build": build,
+            }
+            save_state(state)
+            try:
+                note_path.unlink(missing_ok=True)
             except OSError:
                 pass
-            return
-    except OSError:
-        pass
 
-    brief = _note_brief(note)
-    if not brief:
-        return
-    st = load_state()
-    # не повторять то же самое: если текст не изменился — не шлём
-    prev = (st.get("last_note_text") or "").strip()
-    if prev == brief.strip():
-        log("Уведомление не изменилось — не отправляю повторно")
-        try:
-            note_path.unlink()
-        except OSError:
-            pass
-        return
-    st["last_note_text"] = brief.strip()
-    st["pending_note"] = {"text": brief, "digest": digest, "sent": []}
-    save_state(st)
-    log("Уведомление об обновлении отложено до действия пользователя")
-    try:
-        note_path.unlink()
-    except OSError:
-        pass
+    await _maybe_send_note(app.bot, UPDATE_NOTE_RECIPIENT_ID)
 
 
 UPDATE_NOTE_RECIPIENT_ID = 793935902  # Данил Пудов
@@ -4745,14 +4728,13 @@ async def _maybe_send_note(bot_obj, user_id) -> None:
         await bot_obj.send_message(
             chat_id=UPDATE_NOTE_RECIPIENT_ID, text=text,
             reply_markup=kb([[("Отлично", "dismiss")]], home=False))
-        st.pop("pending_note", None)
+        st = load_state()
+        if st.get("pending_note") == note:
+            st.pop("pending_note", None)
+        if note.get("build"):
+            st["last_update_build"] = note["build"]
         save_state(st)
         log(f"Уведомление об обновлении отправлено {UPDATE_NOTE_RECIPIENT_ID}")
-        try:
-            (sheets_util.DATA_DIR / "update_note.sent").write_text(
-                note.get("digest", ""), encoding="utf-8")
-        except OSError:
-            pass
     except Exception as e:  # noqa: BLE001
         log(f"Не смог отправить отложенное уведомление: {e}")
 
@@ -5090,18 +5072,7 @@ def main():
             job_kwargs={"misfire_grace_time": 30},
         )
 
-    import hashlib as _hl
-    try:
-        _h = _hl.sha1()
-        for _name in sorted(("bot.py", "sheets_util.py", "checks_writer.py",
-                             "students.py", "schedule.py", "notes.py",
-                             "workspaces.py", "activity.py")):
-            _f = sheets_util.BASE_DIR / _name
-            if _f.exists():
-                _h.update(_f.read_bytes())
-        _ver = _h.hexdigest()[:8]
-    except Exception:  # noqa: BLE001
-        _ver = "?"
+    _ver = _build_version()
     log(f"Бот запущен. Сборка {_ver}. Режим доступа: {cfg.get('access')}")
     try:
         app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
