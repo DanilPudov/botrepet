@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import os
 from types import SimpleNamespace
 import re
@@ -4505,6 +4506,14 @@ def _occupied_slot(tutor: str, day: dt.date, time_str: str) -> dict | None:
     return None
 
 
+REMINDER_GRACE_SECONDS = 60
+
+
+def _reminder_job_name(key: str | None) -> str:
+    token = hashlib.blake2s((key or "").encode("utf-8"), digest_size=12).hexdigest()
+    return f"remind-{token}"
+
+
 async def send_lesson_reminder(context: ContextTypes.DEFAULT_TYPE):
     """Через час после начала: полузаполненный чек с кнопками."""
     data = context.job.data or {}
@@ -4551,7 +4560,7 @@ async def send_lesson_reminder(context: ContextTypes.DEFAULT_TYPE):
                  ("❌ Отмена", f"remind:no:{entry['id']}:{date_s}")],
             ]))
     except Exception as e:  # noqa: BLE001
-        log(f"Напоминание не доставлено: {e}")
+        log(f"Напоминание не доставлено: {type(e).__name__}")
         attempt = data.get("attempt", 0)
         queue = getattr(context, "job_queue", None)
         if queue is not None and attempt < 3 and isinstance(e, (NetworkError, RetryAfter)):
@@ -4559,7 +4568,9 @@ async def send_lesson_reminder(context: ContextTypes.DEFAULT_TYPE):
             if isinstance(delay, dt.timedelta):
                 delay = delay.total_seconds()
             queue.run_once(send_lesson_reminder, when=max(1, delay),
-                           data={**data, "attempt": attempt + 1}, name=f"remind-{key}")
+                           data={**data, "attempt": attempt + 1},
+                           name=_reminder_job_name(key),
+                           job_kwargs={"misfire_grace_time": REMINDER_GRACE_SECONDS})
         return
     if key:
         st = load_state()
@@ -4588,6 +4599,7 @@ async def reschedule_reminders(context: ContextTypes.DEFAULT_TYPE):
     jq = context.job_queue
     state = load_state()
     reminded = state.setdefault("reminded", {})
+    scheduled = 0
     for entry in schedule_module.all_entries():
         day = schedule_module.next_occurrence(entry)
         if not day:
@@ -4598,7 +4610,7 @@ async def reschedule_reminders(context: ContextTypes.DEFAULT_TYPE):
         if reminded.get(key) or reminded.get(old_key):
             continue
         try:
-            pending_jobs = jq.get_jobs_by_name(f"remind-{key}")
+            pending_jobs = jq.get_jobs_by_name(_reminder_job_name(key))
             if any(job.data.get("entry", {}).get("время") == entry["время"]
                    for job in pending_jobs):
                 continue
@@ -4630,8 +4642,11 @@ async def reschedule_reminders(context: ContextTypes.DEFAULT_TYPE):
             send_lesson_reminder, when=fire_at - now,
             data={"entry": entry, "date": day.strftime("%d.%m.%Y"),
                   "chat_id": chat_id, "key": key},
-            name=f"remind-{key}")
-        log("Напоминание запланировано")
+            name=_reminder_job_name(key),
+            job_kwargs={"misfire_grace_time": REMINDER_GRACE_SECONDS})
+        scheduled += 1
+    if scheduled:
+        log(f"Напоминаний запланировано: {scheduled}")
 
 
 def _chat_id_by_tutor(tutor: str) -> int | None:
@@ -4656,8 +4671,6 @@ def _note_brief(note: str) -> str:
 
 
 def _build_version() -> str:
-    import hashlib
-
     digest = hashlib.sha1()
     try:
         for path in sorted(sheets_util.BASE_DIR.glob("*.py")):
@@ -4907,24 +4920,25 @@ async def _on_error(update, context) -> None:
             return
     if err is None:
         return
-    if update is None and isinstance(err, NetworkError):
-        log(f"Сетевая ошибка Telegram в фоне: {text[:300]}")
+    if isinstance(err, NetworkError):
+        log(f"Сетевая ошибка Telegram: {type(err).__name__}")
+        message = "Telegram не ответил вовремя. Проверьте результат перед повтором."
+    elif any(marker in text.lower() for marker in (
+        "429", "quota", "ssl", "timed out", "connection",
+        "502", "503", "504", "service temporarily",
+    )):
+        log(f"Сетевая ошибка Google: {type(err).__name__}")
+        message = "Google сейчас не отвечает. Попробуйте через минуту."
+    else:
+        log(f"Ошибка обработки: {type(err).__name__}")
         return
-    # Google недоступен (квота/сеть): раньше репетитор видел полную тишину
-    if any(t in text for t in ("429", "quota", "SSL", "timed out",
-                               "Connection", "502", "503", "504",
-                               "Service temporarily")):
-        try:
-            if getattr(update, "callback_query", None) is not None:
-                await update.callback_query.answer(
-                    "Google сейчас не отвечает. Попробуйте через минуту.",
-                    show_alert=True)
-            elif getattr(update, "effective_message", None) is not None:
-                await update.effective_message.reply_text(
-                    "⚠️ Google сейчас не отвечает. Попробуйте через минуту.")
-        except Exception:  # noqa: BLE001
-            pass
-    log(f"Ошибка обработки: {type(err).__name__}")
+    try:
+        if getattr(update, "callback_query", None) is not None:
+            await update.callback_query.answer(message, show_alert=True)
+        elif getattr(update, "effective_message", None) is not None:
+            await update.effective_message.reply_text(f"⚠️ {message}")
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _single_instance() -> None:
@@ -5010,7 +5024,11 @@ def main():
         print("Токен сохранён в config.json")
 
     try:
-        app = Application.builder().token(token).post_init(post_init).build()
+        builder = Application.builder()
+        builder.connect_timeout(10)
+        builder.read_timeout(10)
+        builder.write_timeout(10)
+        app = builder.token(token).post_init(post_init).build()
     except InvalidToken:
         print_token_rejected()
         sys.exit(3)  # отдельный код: неверный токен, автоперезапуск не поможет
@@ -5052,11 +5070,14 @@ def main():
                     days=tuple(range(7)) if wd < 0 else (wd,))
 
     if app.job_queue is not None:
-        app.job_queue.run_once(reschedule_reminders, when=5)
-        app.job_queue.run_repeating(reschedule_reminders, interval=600, first=60)
-        app.job_queue.run_daily(reschedule_reminders, time=dt.time(hour=0, minute=10))
+        schedule_grace = {"misfire_grace_time": REMINDER_GRACE_SECONDS}
+        app.job_queue.run_once(reschedule_reminders, when=5, job_kwargs=schedule_grace)
+        app.job_queue.run_repeating(
+            reschedule_reminders, interval=600, first=60, job_kwargs=schedule_grace)
+        app.job_queue.run_daily(
+            reschedule_reminders, time=dt.time(hour=0, minute=10), job_kwargs=schedule_grace)
         app.job_queue.run_repeating(check_suggestions_job, interval=3600, first=90)
-        app.job_queue.run_once(_warm_cache, when=1)
+        app.job_queue.run_once(_warm_cache, when=1, job_kwargs=schedule_grace)
         # Допускаем небольшую задержку запуска фонового обновления кэша.
         app.job_queue.run_repeating(
             refresh_cache_job, interval=180, first=120,
