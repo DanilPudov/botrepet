@@ -149,10 +149,10 @@ def ensure_target_sheet(title: str | None = None,
         update_values(sh_id, f"'{title}'!A1:L1", [HEADER])
         log(f"Создан лист «{title}»")
     else:
-        # Шапка может быть защищена владельцем таблицы — не ломаем запись.
+        # Существующая шапка может быть защищена, а подпись ID в L необязательна.
         try:
             cur = get_values(sh_id, f"'{title}'!A1:L1")
-            if not cur or len(cur[0]) < 12:
+            if not cur or not any(cur[0]):
                 update_values(sh_id, f"'{title}'!A1:L1", [HEADER])
         except Exception as e:  # noqa: BLE001
             log(f"Шапка «{title}» не обновлена (защита?): {e}")
@@ -1145,9 +1145,8 @@ def ensure_checks_ids() -> int:
     today_prefix = id_prefix()
     added = 0
     failed = 0
-    for n, row in enumerate(rows):
-        if n == 0:
-            continue
+    # Первые две строки — заголовок и защищённый пример.
+    for n, row in enumerate(rows[2:], start=2):
         cur = str(row[11]).strip() if len(row) > 11 else ""
         if cur:
             continue
