@@ -4879,8 +4879,8 @@ def print_token_rejected():
     print("=" * 60)
     print("Telegram отклонил токен бота (InvalidToken).")
     print("Проверьте токен у @BotFather: /mybots -> ваш бот -> API Token.")
-    print("Вставьте его в config.json -> \"telegram_token\"")
-    print("или запустите:  python bot.py --set-token=123456:AAA...")
+    print("На BotHost установите новый токен в BOT_TOKEN и пересоберите бота.")
+    print("При локальном запуске можно использовать закрытый config.json.")
     print("=" * 60)
 
 
@@ -4978,6 +4978,7 @@ def _single_instance() -> None:
 
 
 def main():
+    sheets_util.configure_logging()
     _single_instance()
     # токен можно задать аргументом: python bot.py --set-token=123:AAA
     set_token = None
@@ -4986,19 +4987,25 @@ def main():
             set_token = a.split("=", 1)[1].strip()
 
     cfg = load_config()
-    token = (set_token
-             or os.environ.get("BOT_TOKEN")
-             or os.environ.get("TELEGRAM_BOT_TOKEN")
-             or cfg.get("telegram_token") or "").strip()
+    token = ""
+    for token_source, value in (
+        ("--set-token", set_token),
+        ("BOT_TOKEN", os.environ.get("BOT_TOKEN")),
+        ("TELEGRAM_BOT_TOKEN", os.environ.get("TELEGRAM_BOT_TOKEN")),
+        ("config.json", cfg.get("telegram_token")),
+    ):
+        token = (value or "").strip()
+        if token:
+            break
     if not token:
         print("=" * 60)
-        print("В config.json не заполнен \"telegram_token\".")
-        print("Получите токен у @BotFather (/newbot) и вставьте его")
-        print("в config.json -> \"telegram_token\": \"123456:AAA...\"")
-        print("или запустите:  python bot.py --set-token=123456:AAA...")
+        print("Токен бота не задан.")
+        print("На BotHost задайте токен @BotFather в BOT_TOKEN.")
+        print("При локальном запуске задайте telegram_token в закрытом config.json.")
         print("=" * 60)
         sys.exit(2)  # отдельный код: start_bot.bat не будет перезапускать
 
+    log(f"Источник токена Telegram: {token_source}")
     if set_token and set_token != cfg.get("telegram_token"):
         cfg["telegram_token"] = set_token
         save_config(cfg)
