@@ -75,7 +75,10 @@ def parse_int(value) -> int | None:
     if isinstance(value, int):
         return value
     if isinstance(value, float):
-        return int(round(value))
+        try:
+            return int(round(value))
+        except (ValueError, OverflowError):
+            return None
     s = str(value)
     for ch in ("\u00a0", " ", "₽", "\t"):
         s = s.replace(ch, "")
@@ -88,7 +91,7 @@ def parse_int(value) -> int | None:
         s = s.replace(",", "")
     try:
         return int(round(float(s)))
-    except ValueError:
+    except (ValueError, OverflowError):
         return None
 
 
@@ -315,22 +318,40 @@ def apply_week_rule(row: int) -> bool:
     return ok
 
 
-def history_entry_keys(start: dt.date) -> set[tuple[str, dt.date, str, int]]:
+def _history_amount_col(header: list) -> int:
+    return 5 if len(header) > 5 and str(header[5]).strip().casefold() == "сумма" else 4
+
+
+def _transfer_key(lesson: dict) -> tuple:
+    lid = str(lesson.get("id") or "").strip()
+    if re.fullmatch(r"AL(?:[0-9]{5,6}|-[A-Z0-9]+-[A-Z0-9]+-[A-Za-z0-9]+)", lid):
+        return ("id", lid)
+    return _legacy_transfer_key(lesson)
+
+
+def _legacy_transfer_key(lesson: dict) -> tuple:
+    return (norm_key_name(lesson["репетитор"]), lesson["дата"],
+            norm_key_name(lesson["ученик"]), int(lesson["сумма"]))
+
+
+def history_entry_keys(start: dt.date) -> set[tuple]:
     """Ключи уже перенесённых в «Историю» записей (репетитор, дата, ученик, сумма)."""
     cfg = load_config()
     rows = get_values(cfg["sheets"]["history"],
-                      f"'{cfg['sheets']['history_sheet']}'!A1:J")
+                      f"'{cfg['sheets']['history_sheet']}'!A1:L")
     keys = set()
-    for row in rows:
+    amount_col = _history_amount_col(rows[0]) if rows else 4
+    for row in rows[1:]:
         if len(row) < 5:
             continue
-        d = cell_date(row)
-        s = parse_int(row[4])
-        if d is None or s is None:
+        day = cell_date(row)
+        amount = parse_int(row[amount_col]) if len(row) > amount_col else None
+        if amount is None and amount_col == 5:
+            amount = parse_int(row[4])
+        if day is None or amount is None or day < start or not norm_key_name(row[2]):
             continue
-        if d < start or not norm_key_name(row[2]):
-            continue
-        keys.add((norm_key_name(row[2]), d, norm_key_name(row[3]), s))
+        keys.add(_transfer_key({"репетитор": row[2], "дата": day, "ученик": row[3],
+                                "сумма": amount, "id": row[11] if len(row) > 11 else ""}))
     return keys
 
 
@@ -338,9 +359,8 @@ def drop_duplicates(checks: list[dict]) -> tuple[list[dict], list[dict]]:
     existing = history_entry_keys(min(c["дата"] for c in checks)) if checks else set()
     fresh, dups = [], []
     for c in checks:
-        key = (norm_key_name(c["репетитор"]), c["дата"],
-               norm_key_name(c["ученик"]), int(c["сумма"]))
-        if key in existing:
+        key = _transfer_key(c)
+        if key in existing or _legacy_transfer_key(c) in existing:
             dups.append(c)
         else:
             fresh.append(c)
@@ -348,10 +368,13 @@ def drop_duplicates(checks: list[dict]) -> tuple[list[dict], list[dict]]:
     return fresh, dups
 
 
-def _fmt_row(c: dict) -> list:
-    return [c["время"], c["дата"].strftime("%d.%m.%Y"), c["репетитор"], c["ученик"],
-            c["сумма"], c["комментарий"], c["первое"], c["как_прошло"], c["будут"],
-            c["комиссия"]]
+def _fmt_row(c: dict, amount_col: int = 4) -> list:
+    values = [c["время"], c["дата"].strftime("%d.%m.%Y"), c["репетитор"], c["ученик"],
+              c["сумма"], c["комментарий"], c["первое"], c["как_прошло"],
+              c["будут"], c["комиссия"]]
+    if amount_col == 5:
+        values.insert(4, "")
+    return values
 
 
 def _norm(v) -> str:
@@ -448,11 +471,11 @@ def insert_missing_rows(checks: list[dict], dry_run: bool = False) -> list[dict]
     existing = history_entry_keys(lo)
     plan: list[dict] = []
     for c in sorted(checks, key=lambda x: x["дата"]):  # stable: как в «Чеках»
-        key = (norm_key_name(c["репетитор"]), c["дата"],
-               norm_key_name(c["ученик"]), int(c["сумма"]))
-        if key in existing:
+        key = _legacy_transfer_key(c)
+        transfer_key = _transfer_key(c)
+        if transfer_key in existing or key in existing:
             continue
-        existing.add(key)
+        existing.add(transfer_key)
 
         # якорь: строка того же дня и того же репетитора
         day_tutor = [i for i, r in enumerate(all_rows, start=1)
@@ -508,11 +531,13 @@ def insert_missing_rows(checks: list[dict], dry_run: bool = False) -> list[dict]
 
     # --- 4) значения и оформление ---
     fmt_reqs = []
+    amount_col = _history_amount_col(all_rows[0])
+    last_column = "K" if amount_col == 5 else "J"
     for item in plan:
         t = item["строка"]
         lesson = item["запись"]
-        row_range = f"'{title}'!A{t}:J{t}"
-        values = [_fmt_row(lesson)]
+        row_range = f"'{title}'!A{t}:{last_column}{t}"
+        values = [_fmt_row(lesson, amount_col)]
         if lesson.get("id"):
             update_values_batch(sh_id, [
                 {"range": row_range, "values": values},
@@ -523,14 +548,14 @@ def insert_missing_rows(checks: list[dict], dry_run: bool = False) -> list[dict]
         fmt_reqs += [
             {"repeatCell": {
                 "range": {"sheetId": 0, "startRowIndex": t - 1, "endRowIndex": t,
-                          "startColumnIndex": 0, "endColumnIndex": 10},
+                          "startColumnIndex": 0, "endColumnIndex": amount_col + 6},
                 "cell": {"userEnteredFormat": {
                     "horizontalAlignment": "CENTER", "verticalAlignment": "MIDDLE",
                     "textFormat": {"foregroundColor": WHITE}}},
                 "fields": "userEnteredFormat(horizontalAlignment,verticalAlignment,textFormat)"}},
             {"repeatCell": {
                 "range": {"sheetId": 0, "startRowIndex": t - 1, "endRowIndex": t,
-                          "startColumnIndex": 4, "endColumnIndex": 5},
+                          "startColumnIndex": amount_col, "endColumnIndex": amount_col + 1},
                 "cell": {"userEnteredFormat": {"textFormat": {
                     "foregroundColor": GREEN if item["запись"]["paid"] else RED}}},
                 "fields": "userEnteredFormat.textFormat"}},

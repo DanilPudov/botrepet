@@ -408,53 +408,46 @@ def fmt_date_ru(d: dt.date) -> str:
 
 
 def parse_amount(text: str) -> int | None:
-    """Сумма из текста: '1 700' / '1700₽' / '1500.0' / '1 700,50' -> int.
+    """Положительная сумма в рублях с обычными разделителями разрядов."""
+    value = re.sub(r"\s*[₽р]\s*$", "", str(text or "").strip(), flags=re.IGNORECASE)
+    value = re.sub(r"[\t \u00a0\u202f]+", " ", value).strip()
+    if len(value) > 64:
+        return None
+    if " " in value:
+        if not re.fullmatch(r"\+?[0-9]{1,3}(?: [0-9]{3})+(?:[.,][0-9]+)?", value):
+            return None
+        value = value.replace(" ", "")
+    if not re.fullmatch(r"\+?[0-9]+(?:[.,][0-9]+)*", value):
+        return None
 
-    Раньше вырезались все нецифры: «1500.0» → 15000 (в 10 раз больше!).
-    Теперь дробная часть отбрасывается корректно.
-    """
-    s = str(text or "")
-    # «18:00» на шаге суммы — это время, а не деньги. Раньше молча
-    # превращалось в 1800 ₽.
-    if ":" in s:
-        return None
-    for ch in ("\u00a0", " ", "\t", "₽", "р", "Р", "$", "€"):
-        s = s.replace(ch, "")
-    if not s:
-        return None
-    # «1e9», «abc»: буквы в сумме недопустимы. Раньше они вырезались,
-    # и «1e9» молча становилось 19 ₽.
-    if any(ch.isalpha() for ch in s):
-        return None
-    # «1.700,50»: точка — разделитель тысяч, запятая — десятичная
-    if "," in s and "." in s:
-        last_dot, last_comma = s.rfind("."), s.rfind(",")
-        if last_comma > last_dot:
-            s = s.replace(".", "").replace(",", ".")
+    value = value.lstrip("+")
+    dot = value.rfind(".")
+    comma = value.rfind(",")
+    if dot >= 0 and comma >= 0:
+        decimal = "." if dot > comma else ","
+        grouping = "," if decimal == "." else "."
+        whole, fraction = value.rsplit(decimal, 1)
+        if not re.fullmatch(r"[0-9]{1,3}(?:" + re.escape(grouping) + r"[0-9]{3})+", whole):
+            return None
+        value = whole.replace(grouping, "") + "." + fraction
+    elif dot >= 0 or comma >= 0:
+        separator = "." if dot >= 0 else ","
+        groups = value.split(separator)
+        if (len(groups[0]) <= 3 and int(groups[0]) > 0
+                and all(len(group) == 3 for group in groups[1:])):
+            value = "".join(groups)
+        elif len(groups) == 2:
+            value = ".".join(groups)
         else:
-            s = s.replace(",", "")          # «1,700.50»
-    elif "," in s:
-        s = s.replace(",", ".")
-    elif s.count(".") > 1:
-        s = s.replace(".", "")              # «1.700.500» — разряды
-    elif "." in s:
-        head, _, tail = s.partition(".")
-        # «1.700» — это 1700, а «1500.0» — 1500
-        if len(tail) == 3 and tail.isdigit() and head.isdigit():
-            s = head + tail
-    # оставить только цифры, точку и минус
-    s = "".join(ch for ch in s if ch.isdigit() or ch in ".-")
-    if not s or s in (".", "-", "-."):
-        return None
-    try:
-        val = float(s)
-    except ValueError:
-        return None
-    val = int(round(val))           # дробную часть отбрасываем
-    if not (0 < val <= 1_000_000):
-        return None
-    return val
+            return None
 
+    from decimal import Decimal
+
+    amount = Decimal(value)
+    if not 0 < amount <= 1_000_000:
+        return None
+    rounded = round(amount)
+    return rounded if rounded > 0 else None
 
 
 def _name_words(name: str) -> list[str]:

@@ -208,6 +208,13 @@ def add_cancel(tutor: str, student: str, day: dt.date, time_str: str) -> str:
     with sheets_util.RECORD_ID_LOCK:
         sh_id = sheet_for(tutor)
         ensure_cancel_sheet(sh_id, tutor)
+        slot = parse_time_slot(time_str)
+        if slot is None:
+            raise ValueError("Некорректное время в отмене занятия.")
+        previous = next((item for item in cancels_for(tutor, strict=True)
+                         if item["дата"] == day and parse_time_slot(item["время"]) == slot), None)
+        if previous:
+            return str(previous["id"])
         rid, record = _cancel_record(tutor, student, day, time_str)
         sheets_util.update_values(sh_id, record["range"], record["values"])
         log("Отмена занятия записана")
@@ -232,7 +239,9 @@ def parse_time_slot(value) -> int | None:
     совпадающими → занятие ложно помечалось отменённым.
     """
     try:
-        parts = str(value).replace(".", ":").split(":")
+        parts = str(value).strip().replace(".", ":").split(":")
+        if len(parts) > 2 or any(not part.isdecimal() or len(part) > 2 for part in parts):
+            return None
         hh = int(parts[0])
         mm = int(parts[1]) if len(parts) > 1 else 0
         if not (0 <= hh <= 23 and 0 <= mm <= 59):
@@ -244,18 +253,21 @@ def parse_time_slot(value) -> int | None:
 
 def remove_cancel(tutor: str, day: dt.date, time_str: str) -> bool:
     """Снять отмену занятия (вернуть в расписание на эту дату)."""
+    slot = parse_time_slot(time_str)
+    if slot is None:
+        return False
     sh_id = sheet_for(tutor)
-    for c in cancels_for(tutor):
-        if c["дата"] == day and parse_time_slot(c["время"]) == parse_time_slot(time_str):
-            try:
-                sheets_util.update_values(
-                    sh_id, f"'{CANCEL_SHEET}'!A{c['row']}:E{c['row']}", [[""] * 5])
-            except Exception as e:  # noqa: BLE001
-                log(f"Не удалось снять отмену: {e}")
-                return False
-            log("Отмена занятия снята")
-            return True
-    return False
+    with sheets_util.RECORD_ID_LOCK:
+        rows = [item["row"] for item in cancels_for(tutor, strict=True)
+                if item["дата"] == day and parse_time_slot(item["время"]) == slot]
+        if not rows:
+            return False
+        sheets_util.update_values_batch(sh_id, [
+            {"range": f"'{CANCEL_SHEET}'!A{row}:E{row}", "values": [[""] * 5]}
+            for row in rows
+        ])
+    log("Отмена занятия снята")
+    return True
 
 
 def next_date_for_weekday(weekday: int, after: dt.date | None = None) -> dt.date:
@@ -280,13 +292,10 @@ def entries_for(tutor: str, student: str) -> list[dict]:
 def get_entry(entry_id, tutor: str = "") -> dict | None:
     """Запись расписания по ID. Если задан репетитор — только его."""
     want = str(entry_id).strip()
-    for e in all_entries():
-        if str(e["id"]).strip() != want:
-            continue
-        if tutor and norm_name(e.get("репетитор", "")) != norm_name(tutor):
-            continue
-        return e
-    return None
+    matches = [entry for entry in all_entries()
+               if str(entry["id"]).strip() == want
+               and (not tutor or norm_name(entry.get("репетитор", "")) == norm_name(tutor))]
+    return matches[0] if len(matches) == 1 else None
 
 
 def update_entry(entry_id, day: str, time_str: str,
@@ -450,29 +459,39 @@ def all_entries() -> list[dict]:
 
 
 def parse_days(text: str) -> list[int]:
-    """'Пн,Ср' / 'пн ср' / '1,3' -> [0, 2]."""
-    text = (text.replace(";", ",").replace("/", ",")
-             .replace(" ", ",").replace("\t", ",").lower())
-    out = []
+    """Разобрать отдельные дни недели и диапазоны, например «Пн–Ср»."""
+    text = " ".join(str(text or "").casefold().split())
+    if text in ("каждый день", "ежедневно"):
+        return list(range(7))
+    aliases = {name.casefold(): i for i, name in enumerate(DAY_NAMES)}
+    aliases.update({name.casefold(): i for i, name in enumerate(FULL_DAY_NAMES)})
+    aliases.update({str(i + 1): i for i in range(7)})
+
+    def day_index(value: str) -> int | None:
+        result = aliases.get(value)
+        if result is not None:
+            return result
+        if len(value) >= 3:
+            return next((i for i, name in enumerate(FULL_DAY_NAMES)
+                         if name.casefold().startswith(value)), None)
+        return None
+
+    text = text.replace("–", "-").replace("—", "-").replace(" -", "-").replace("- ", "-")
+    for separator in (";", "/", " "):
+        text = text.replace(separator, ",")
+    out: set[int] = set()
     for part in text.split(","):
-        part = part.strip()
-        if not part:
+        first, sep, last = part.partition("-")
+        start = day_index(first)
+        if start is None:
             continue
-        if part.isdigit():
-            idx = int(part) - 1
-            if 0 <= idx <= 6:
-                out.append(idx)
+        if not sep:
+            out.add(start)
             continue
-        short = part[:2].capitalize()
-        if short in DAY_NAMES:
-            out.append(DAY_NAMES.index(short))
-            continue
-        # «понедельник», «воскресенье» и т.п.
-        for w, full in enumerate(FULL_DAY_NAMES):
-            if part and (full.startswith(part[:3]) or part.startswith(full[:3])):
-                out.append(w)
-                break
-    return sorted(set(out))
+        end = day_index(last)
+        if end is not None:
+            out.update((start + offset) % 7 for offset in range((end - start) % 7 + 1))
+    return sorted(out)
 
 
 def next_occurrence(entry: dict, after: dt.date | None = None) -> dt.date | None:

@@ -287,17 +287,9 @@ def find_student(tutor: str, student: str,
         exact = [s for s in roster if names_match(s["ученик"], student)]
     if not exact:
         return None
-    if len(exact) == 1:
-        return exact[0]
-    # несколько тёзок — выбираем по родителю
     if parent:
-        wp = norm_name(parent)
-        by_parent = [s for s in exact
-                     if norm_name(s.get("родитель", "")) == wp
-                     or names_match(s.get("родитель", ""), parent)]
-        if len(by_parent) == 1:
-            return by_parent[0]
-    return None
+        exact = [s for s in exact if names_match(s.get("родитель", ""), parent)]
+    return exact[0] if len(exact) == 1 else None
 
 
 def _find_row(tutor: str, student: str) -> int | None:
@@ -426,17 +418,23 @@ def update_student(tutor: str, student: str, *, new_name: str | None = None,
 
 
 
-def update_student_row(row: int, tutor: str = "", **fields) -> bool:
-    """Обновить ученика по номеру строки (когда имена совпадают)."""
-    cfg = load_config()
+def update_student_row(row: int, tutor: str = "", *, match_student: str | None = None,
+                       match_parent: str | None = None, **fields) -> bool:
+    """Обновить ученика в строке, если это всё ещё выбранная карточка."""
     sh_id = workspaces.spreadsheet_for(tutor)
     try:
-        rows = _rows(tutor)
+        rows = _rows(tutor, fresh=True)
     except Exception:  # noqa: BLE001
         return False
     if row < 2 or row > len(rows):
         return False
     cur_row = rows[row - 1]
+    if (not names_match(_cell(cur_row, 0), tutor)
+            or (match_student is not None and
+                norm_name(_cell(cur_row, 1)).casefold() != norm_name(match_student).casefold())
+            or (match_parent is not None and
+                norm_name(_cell(cur_row, 2)).casefold() != norm_name(match_parent).casefold())):
+        return False
     name = fields.get("new_name") if fields.get("new_name") is not None \
         else _cell(cur_row, 1)
     parent = fields.get("parent") if fields.get("parent") is not None \
@@ -485,12 +483,20 @@ def delete_student(tutor: str, student: str, where_row: int | None = None,
     if row is None:
         found = find_student(tutor, student, parent=match_parent)
         row = found["row"] if found else None
-    if row is None:
+    if row is None or row < 2:
         return False
-    cfg = load_config()
     sh_id = workspaces.spreadsheet_for(tutor)
-    sheets_util.clear_values(
-        sh_id, f"'{sheet_title()}'!A{row}:{_LAST_COL}{row}")
+    with sheets_util.RECORD_ID_LOCK:
+        rows = _rows(tutor, fresh=True)
+        if row > len(rows):
+            return False
+        source = rows[row - 1]
+        if (not names_match(_cell(source, 0), tutor)
+                or norm_name(_cell(source, 1)).casefold() != norm_name(student).casefold()
+                or (match_parent is not None and
+                    norm_name(_cell(source, 2)).casefold() != norm_name(match_parent).casefold())):
+            return False
+        sheets_util.clear_values(sh_id, f"'{sheet_title()}'!A{row}:{_LAST_COL}{row}")
     log(f"УЧЕНИК удалён строка {row}: {tutor} — {student}")
     invalidate_students_cache()
     return True

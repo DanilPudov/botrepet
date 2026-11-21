@@ -11,6 +11,7 @@ import hashlib
 import os
 from types import SimpleNamespace
 import re
+import secrets
 import html
 import sys
 from pathlib import Path
@@ -494,11 +495,10 @@ def _countdown(day: dt.date, time_str: str) -> str:
     """'через 3 ч', 'через 40 мин', 'сейчас' или '' если время не указано."""
     if not time_str:
         return ""
-    try:
-        hh, mm = map(int, str(time_str).split(":")[:2])
-    except (ValueError, TypeError):
+    slot = schedule_module.parse_time_slot(time_str)
+    if slot is None:
         return ""
-    target = dt.datetime.combine(day, dt.time(hour=hh, minute=mm))
+    target = dt.datetime.combine(day, dt.time(hour=slot // 60, minute=slot % 60))
     delta = target - dt.datetime.now()
     minutes = int(delta.total_seconds() // 60)
     if minutes < -30:
@@ -567,22 +567,17 @@ def _student_link(s: dict, kind: str) -> str:
 
 
 def _already_recorded(tutor: str, date_s: str, time_s: str,
-                      student: str) -> bool:
-    """Есть ли уже точно такая запись (репетитор+дата+время+ученик)."""
-    try:
-        day = dt.datetime.strptime(str(date_s), "%d.%m.%Y").date()
-    except (ValueError, TypeError):
-        return False
-    try:
-        for x in checks_writer.read_lessons():
-            if (names_match(x.get("репетитор", ""), tutor)
-                    and x.get("дата") == day
-                    and str(x.get("время", "")).strip() == str(time_s).strip()
-                    and names_match(x.get("ученик", ""), student)):
-                return True
-    except Exception:  # noqa: BLE001
-        return False
-    return False
+                      student: str, parent: str = "") -> bool:
+    """Проверить занятие по репетитору, дате, времени и карточке ученика."""
+    day = dt.datetime.strptime(date_s, "%d.%m.%Y").date()
+    return any(
+        names_match(item.get("репетитор", ""), tutor)
+        and item.get("дата") == day
+        and str(item.get("время", "")).strip() == str(time_s).strip()
+        and norm_name(item.get("ученик", "")).casefold() == norm_name(student).casefold()
+        and norm_name(item.get("родитель", "")).casefold() == norm_name(parent).casefold()
+        for item in checks_writer.read_lessons_for_save(tutor)
+    )
 
 
 # Когда ботом последний раз пользовались (для фонового обновления кэша)
@@ -1141,7 +1136,7 @@ async def begin_new(update: Update, context: ContextTypes.DEFAULT_TYPE, edit: bo
     rows = []
     for i, s in enumerate(students):
         label = s["ученик"] + (f" ({s['родитель']})" if s.get("родитель") else "")
-        rows.append([(label[:40], f"stu:{i}")])
+        rows.append([(label[:40], f"stu:{s.get('id') or i}")])
     rows.append([("➕ Добавить ученика", "add_student"), ("Отменить", "cancel")])
     await _say(update, text, reply_markup=kb(rows))
 
@@ -1330,6 +1325,46 @@ async def _nav_go(update: Update, context: ContextTypes.DEFAULT_TYPE,
         _NAV_PENDING.pop(user.id, None)
 
 
+def _valid_button_data(data: str) -> bool:
+    """Проверить аргументы кнопок, которые дальше преобразуются в дату или число."""
+    action, _, arg = data.partition(":")
+    if action in ("schday", "addw"):
+        return arg in ("0", "1", "2", "3", "4", "5", "6")
+    if action in ("first", "will"):
+        return arg in ("yes", "no")
+    if action == "with":
+        return arg in ("Отлично", "Нормально", "Плохо")
+    if action == "commission":
+        return arg == "0" or parse_amount(arg) is not None
+    if action == "student":
+        return bool(re.fullmatch(r"[0-9]{1,6}|[A-Za-z][A-Za-z0-9-]{0,47}", arg))
+    if action == "review" and arg.startswith("stu:"):
+        return _valid_button_data(f"student:{arg[4:]}")
+    if action == "d":
+        match = re.fullmatch(r"([0-9]{4})-([0-9]{1,2})", arg)
+        return bool(match and 1 <= int(match[1]) <= 9999 and 1 <= int(match[2]) <= 12)
+    if action in ("cx", "uncancel"):
+        date, _, time = arg.partition(":")
+        if not parse_time(time):
+            return False
+    elif action == "remind":
+        parts = arg.split(":")
+        if len(parts) != 3 or parts[0] not in ("ok", "was", "move", "no") or not parts[1]:
+            return False
+        date = parts[2]
+    elif action in ("cxd", "dd"):
+        date = arg
+    elif action == "date" and arg not in ("today", "yesterday", "cal", "back"):
+        date = arg
+    else:
+        return True
+    try:
+        dt.datetime.strptime(date, "%d.%m.%Y" if action in ("remind", "date") else "%Y-%m-%d")
+    except ValueError:
+        return False
+    return True
+
+
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     user = q.from_user
@@ -1338,6 +1373,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.answer("Нет доступа", show_alert=True)
         return
     data = _NAV_PENDING.pop(user.id, None) or (q.data or "")
+    if not _valid_button_data(data):
+        await q.answer("Кнопка устарела. Откройте раздел заново.", show_alert=True)
+        return
     if data == "nav:back":
         await _nav_go(update, context, _nav_pop(user.id))
         return
@@ -1370,6 +1408,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("sug:"):
         parts = data.split(":")
         action = parts[1]
+        if action not in ("ok", "no"):
+            await q.answer("Действие устарело.", show_alert=True)
+            return
         row = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
         if role_of(user.id) != OWNER:
             await q.answer("Только организатор", show_alert=True)
@@ -1502,10 +1543,15 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                show_alert=True)
                 return
             await q.answer()
-            if _already_recorded(entry["репетитор"], date_s,
-                                 entry["время"], entry["ученик"]):
-                await q.edit_message_text(
-                    f"ℹ️ Это занятие уже записано ({date_s}).")
+            try:
+                recorded = _already_recorded(entry["репетитор"], date_s, entry["время"],
+                                             entry["ученик"], entry.get("родитель", ""))
+            except Exception as error:  # noqa: BLE001
+                log(f"Не удалось проверить занятие: {type(error).__name__}")
+                await q.edit_message_text("Не удалось проверить, записано ли занятие. Откройте его заново.")
+                return
+            if recorded:
+                await q.edit_message_text(f"ℹ️ Это занятие уже записано ({date_s}).")
                 return
             try:
                 checks_writer.append_check({
@@ -1554,10 +1600,15 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                show_alert=True)
                 return
             await q.answer()
-            if _already_recorded(entry["репетитор"], date_s,
-                                 entry["время"], entry["ученик"]):
-                await q.edit_message_text(
-                    f"ℹ️ Это занятие уже записано ({date_s}).")
+            try:
+                recorded = _already_recorded(entry["репетитор"], date_s, entry["время"],
+                                             entry["ученик"], entry.get("родитель", ""))
+            except Exception as error:  # noqa: BLE001
+                log(f"Не удалось проверить занятие: {type(error).__name__}")
+                await q.edit_message_text("Не удалось проверить, записано ли занятие. Откройте его заново.")
+                return
+            if recorded:
+                await q.edit_message_text(f"ℹ️ Это занятие уже записано ({date_s}).")
                 return
             try:
                 checks_writer.append_check({
@@ -1607,6 +1658,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         st = load_state()
         if arg == "me":
             (st.get("view_as") or {}).pop(str(user.id), None)
+            (st.get("pending") or {}).pop(str(user.id), None)
             save_state(st)
             await show_main(update, context, edit=True)
             return
@@ -1621,6 +1673,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         idx = int(arg) if arg.isdigit() else -1
         if 0 <= idx < len(names):
             st.setdefault("view_as", {})[str(user.id)] = names[idx]
+            (st.get("pending") or {}).pop(str(user.id), None)
             save_state(st)
             await show_main(update, context, edit=True)
         else:
@@ -1672,7 +1725,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("pay:"):
         lid = data.split(":", 1)[1]
         try:
-            updated = checks_writer.set_lesson_paid(lid, True, title=_sheet_of(lid))
+            title = _sheet_of(lid)
+            updated = bool(title and checks_writer.set_lesson_paid(lid, True, title=title))
         except Exception as e:  # noqa: BLE001
             await q.answer(f"Ошибка: {e}", show_alert=True)
             return
@@ -1686,7 +1740,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("unpay:"):
         lid = data.split(":", 1)[1]
         try:
-            updated = checks_writer.set_lesson_paid(lid, False, title=_sheet_of(lid))
+            title = _sheet_of(lid)
+            updated = bool(title and checks_writer.set_lesson_paid(lid, False, title=title))
         except Exception as e:  # noqa: BLE001
             await q.answer(f"Ошибка: {e}", show_alert=True)
             return
@@ -1705,13 +1760,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:  # noqa: BLE001
             log(f"Не смог прочитать заметку: {e}")
             note = ""
-        text = "📝 *Заметки*\n\n" + (note if note else "_Пока пусто._")
+        text = "📝 <b>Заметки</b>\n\n" + (html.escape(note) if note else "<i>Пока пусто.</i>")
         rows = [[("✏️ Изменить", "notes:edit")]]
         if note:
             rows.append([("🗑 Очистить", "notes:clear")])
         rows.append([("🏠 На главный экран", "menu")])
-        await q.edit_message_text(text, parse_mode=ParseMode.MARKDOWN,
-                                  reply_markup=kb(rows))
+        await _say(update, text, parse_mode=ParseMode.HTML, reply_markup=kb(rows))
         return
 
     if data == "notes:edit":
@@ -1737,10 +1791,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.answer()
         tutor_nm = name_by_id(user.id) or ""
         try:
-            notes_module.clear_note(tutor_nm) if tutor_nm else None
+            cleared = bool(tutor_nm and notes_module.clear_note(tutor_nm))
+            result = "📝 Заметка очищена." if cleared else "Заметка не найдена."
         except Exception as e:  # noqa: BLE001
-            log(f"Не смог очистить заметку: {e}")
-        await q.edit_message_text("📝 Заметка очищена.",
+            log(f"Не смог очистить заметку: {type(e).__name__}")
+            result = "Не удалось очистить заметку. Попробуйте ещё раз."
+        await q.edit_message_text(result,
                                   reply_markup=kb([[("🏠 На главный экран", "menu")]]))
         return
 
@@ -1753,7 +1809,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data in ("menu", "faq", "help"):
         await q.answer()
         if data in ("faq", "help"):
-            await q.answer()
             await q.edit_message_text(_faq_text(), parse_mode=ParseMode.HTML,
                                       reply_markup=kb([[("⬅️ Назад", "nav:back")]]))
             return
@@ -1902,16 +1957,16 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # --- карточка ученика
     if data.startswith("student:"):
         await q.answer()
-        idx = int(data.split(":", 1)[1])
+        key = data.split(":", 1)[1]
         tutor = name_by_id(user.id) or ""
         roster = students_module.students_of(tutor) if tutor else []
-        if idx >= len(roster):
+        s = _student_from_button(roster, key)
+        if s is None:
             await q.edit_message_text("Список устарел.",
                                       reply_markup=kb([[("⬅️ Назад", "students")]]))
             return
-        s = roster[idx]
         p = {"шаг": "карточка_ученика", "ученик": s["ученик"],
-             "репетитор": tutor, "индекс": idx, "row": s.get("row")}
+             "родитель": s.get("родитель", ""), "репетитор": tutor, "row": s.get("row")}
         set_pending(user.id, p)
         text = _card_text(s, _schedule_summary(tutor, s["ученик"]), html_mode=True)
         await q.edit_message_text(text, parse_mode=ParseMode.HTML,
@@ -1931,17 +1986,20 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("sedit:"):
         await q.answer()
         p = get_pending(user.id)
-        if not p or not p.get("ученик"):
+        if (not p or not p.get("ученик")
+                or p.get("шаг") not in ("карточка_ученика", "расписание")):
             await q.edit_message_text("Откройте ученика заново.",
                                       reply_markup=kb([[("⬅️ Назад", "students")]]))
             return
         what = data.split(":", 1)[1]
         if what == "del":
+            p["шаг"] = "подтверждение_удаления_ученика"
+            p["delete_token"] = secrets.token_urlsafe(9)
+            set_pending(user.id, p)
             await q.edit_message_text(
-                f"❗ Удалить ученика *{p['ученик']}*?\n"
-                "Его цена, комментарий и расписание тоже исчезнут.",
-                parse_mode=ParseMode.MARKDOWN,
-                reply_markup=kb([[("🗑 Да, удалить", "del:yes")],
+                f"❗ Удалить карточку ученика {p['ученик']}?\n"
+                "Цена, ссылки и комментарий из карточки будут удалены.",
+                reply_markup=kb([[("🗑 Да, удалить", f"del:yes:{p['delete_token']}")],
                                  [("Отмена", "del:no")]]))
             return
         if what == "comment":
@@ -2019,7 +2077,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         roster = students_module.students_of(tutor) if tutor else []
         p = {"шаг": "отзыв_ученик", "репетитор": tutor}
         set_pending(user.id, p)
-        rows = [[(s["ученик"], f"review:stu:{i}")] for i, s in enumerate(roster)]
+        rows = [[(s["ученик"], f"review:stu:{s.get('id') or i}")] for i, s in enumerate(roster)]
         rows.append([("Без ученика", "review:stu:none"),
                      ("⬅️ Назад", "reviews")])
         await q.edit_message_text(
@@ -2035,8 +2093,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             p["отзыв_ученик"] = ""
         else:
             roster = students_module.students_of(tutor) if tutor else []
-            idx = int(arg)
-            p["отзыв_ученик"] = roster[idx]["ученик"] if idx < len(roster) else ""
+            student = _student_from_button(roster, arg)
+            if student is None:
+                await q.edit_message_text("Список устарел. Выберите ученика заново.",
+                                          reply_markup=kb([[("За кого отзыв", "review:add")]]))
+                return
+            p["отзыв_ученик"] = student["ученик"]
         p["шаг"] = "отзыв_текст"
         set_pending(user.id, p)
         await q.edit_message_text(
@@ -2299,14 +2361,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("sdel:"):
         await q.answer()
         eid = data.split(":", 1)[1]
-        _e = schedule_module.get_entry(eid)
-        schedule_module.delete_entry(eid, (_e or {}).get("репетитор", ""),
-                                    (_e or {}).get("sh_id", ""))
-        text, buttons = await schedule_view(user.id, 7)
-        buttons = buttons + [[("🏠 На главный экран", "menu")]]
-        await q.edit_message_text(
-            text, parse_mode=ParseMode.HTML,
-            reply_markup=kb(buttons))
+        await _confirm_schedule_deletion(update, eid)
         return
 
     if data.startswith("sched:"):
@@ -2359,19 +2414,25 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # --- подтверждение удаления
-    if data == "del:yes":
+    if data == "del:yes" or data.startswith("del:yes:"):
         await q.answer()
         p = get_pending(user.id) or {}
-        _tut = p.get("репетитор") or name_by_id(user.id) or ""
+        _tut = name_by_id(user.id) or ""
+        if (p.get("шаг") != "подтверждение_удаления_ученика"
+                or data != f"del:yes:{p.get('delete_token')}"
+                or not names_match(p.get("репетитор", ""), _tut)):
+            await q.edit_message_text("Подтверждение устарело. Откройте карточку заново.",
+                                      reply_markup=kb([[("К ученикам", "students")]]))
+            return
         _ok = False
         if p.get("ученик"):
             try:
                 _ok = students_module.delete_student(
                     _tut, p["ученик"],
                     where_row=p.get("row"),
-                    match_parent=p.get("родитель") or None)
-            except TypeError:
-                _ok = students_module.delete_student(_tut, p["ученик"])
+                    match_parent=p.get("родитель", ""))
+            except (ValueError, TypeError):
+                _ok = False
             if _ok:
                 log_action(user.id, "удалил ученика",
                            f"{p.get('ученик','')} ({_tut})")
@@ -2394,6 +2455,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_student_card(update, context,
                                 p.get("репетитор") or name_by_id(user.id) or "",
                                 p.get("ученик", ""))
+        return
         return
 
     # --- дубль ученика
@@ -2514,17 +2576,35 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data.startswith("sch:del:"):
         await q.answer()
-        rid = data.split(":")[2]
-        _e = schedule_module.get_entry(rid, name_by_id(user.id) or "")
-        schedule_module.delete_entry(rid, (_e or {}).get("репетитор", ""),
-                                    (_e or {}).get("sh_id", ""))
+        rid = data.split(":", 2)[2]
+        if not rid.startswith("yes:"):
+            await _confirm_schedule_deletion(update, rid)
+            return
+        p = get_pending(user.id) or {}
+        deletion = p.get("schedule_delete") or {}
+        confirmation = rid.split(":", 1)[1]
+        if (not confirmation or confirmation != deletion.get("token")
+                or deletion.get("tutor") != name_by_id(user.id)
+                or not _delete_selected_schedule(user.id, deletion.get("id", ""))):
+            await q.edit_message_text("Подтверждение устарело. Откройте расписание заново.",
+                                      reply_markup=kb([[("К расписанию", "sched:week")]]))
+            return
+        p.pop("schedule_delete", None)
+        set_pending(user.id, p)
+        await _resched_now(context)
         await show_student_schedule(update, context)
         return
 
     if data.startswith("sch:edit:"):
         await q.answer()
         rid = data.split(":")[2]
+        tutor = name_by_id(user.id)
+        if not tutor or not schedule_module.get_entry(rid, tutor):
+            await q.edit_message_text("Запись недоступна. Откройте расписание заново.",
+                                      reply_markup=kb([[("К расписанию", "sched:week")]]))
+            return
         p = get_pending(user.id) or {}
+        p["репетитор"] = tutor
         p["шаг"] = "расписание_правка"
         p["edit_id"] = rid
         set_pending(user.id, p)
@@ -2556,19 +2636,18 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_main(update, context, edit=True)
         return
 
+    if data.startswith(("date:", "d:", "dd:", "rate:", "amount:", "time:")):
+        if not p.get("ученик") or not p.get("репетитор"):
+            await q.answer("Сначала выберите ученика.", show_alert=True)
+            return
+
     # --- выбор ученика из списка
     if data.startswith("stu:"):
         await q.answer()
         key = data.split(":", 1)[1]
         tutor = p.get("репетитор") or name_by_id(user.id) or ""
         roster = students_module.students_of(tutor) if tutor else []
-        st = next((s for s in roster if s.get("id") == key), None)
-        if st is None:
-            try:
-                idx = int(key)
-                st = roster[idx] if idx < len(roster) else None
-            except (TypeError, ValueError):
-                st = None
+        st = _student_from_button(roster, key)
         if st is None:
             await q.edit_message_text(
                 "Список устарел, начните заново.",
@@ -2587,7 +2666,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # --- сумма
     if data == "rate:use":
         await q.answer()
-        p["сумма"] = str(p.get("тариф", "")).replace(" ", "")
+        amount = parse_amount(p.get("тариф", ""))
+        if amount is None:
+            p["тариф"] = ""
+            await ask_amount(update, context, p)
+            return
+        p["сумма"] = str(amount)
         await ask_time(update, context, p)
         return
 
@@ -2610,7 +2694,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.edit_message_text("Напишите сумму числом, например: `1700`",
                                       reply_markup=kb([[("Отменить", "cancel")]]))
             return
-        p["сумма"] = arg.replace(" ", "")
+        amount = parse_amount(arg)
+        if amount is None:
+            await q.edit_message_text("Некорректная сумма. Выберите сумму заново.",
+                                      reply_markup=kb([[("Выбрать сумму", "amount:custom")]]))
+            return
+        p["сумма"] = str(amount)
         # цену запоминаем за учеником (если её ещё не было)
         if not p.get("тариф") and p.get("ученик") and p.get("репетитор"):
             try:
@@ -2677,6 +2766,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # --- время
     if data == "time:now":
         await q.answer()
+        if p.get("дата") != dt.date.today().strftime("%d.%m.%Y"):
+            await ask_time(update, context, p)
+            return
         p["время"] = checks_writer.now_hhmm()
         await show_confirm(update, context, p)
         return
@@ -2711,7 +2803,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data.startswith("time:slot:"):
         await q.answer()
-        p["время"] = data.split(":", 2)[2]
+        slot = parse_time(data.split(":", 2)[2])
+        if slot is None:
+            await q.edit_message_text("Время устарело. Выберите время заново.",
+                                      reply_markup=kb([[("Выбрать время", "time:enter")]]))
+            return
+        p["время"] = slot
         await show_confirm(update, context, p)
         return
 
@@ -2794,29 +2891,43 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # --- сохранение
-    if data in ("save", "save:force"):
-        await q.answer()
+    if data == "save" or data.startswith("save:"):
         p = get_pending(user.id) or {}
-        if data == "save:force":
-            p["force_dup"] = True
-            set_pending(user.id, p)
-        # проверка дублей: то же занятие (дата, ученик, сумма, время)
-        if not p.get("force_dup"):
+        _, _, token = data.partition(":")
+        force = token.startswith("force:")
+        if force:
+            token = token.split(":", 1)[1]
+        tutor = name_by_id(user.id)
+        draft_key = _lesson_draft_key(p)
+        if (p.get("шаг") != "подтверждение" or not tutor or not draft_key
+                or not token or token != p.get("confirm_token")
+                or not names_match(p.get("репетитор", ""), tutor)
+                or (force and p.get("duplicate_confirmation") != draft_key)):
+            await q.answer("Подтверждение устарело. Проверьте запись заново.", show_alert=True)
+            return
+        await q.answer()
+        save_button = f"save:{token}"
+        if not force:
             try:
                 existing = [
-                    x for x in checks_writer.read_lessons()
+                    x for x in checks_writer.read_lessons_for_save(tutor)
                     if norm_name(x["репетитор"]) == norm_name(p.get("репетитор", ""))
                     and x["дата"] == dt.datetime.strptime(
                         str(p.get("дата", "")), "%d.%m.%Y").date()
-                    and norm_name(x["ученик"]) == norm_name(p.get("ученик", ""))
+                    and norm_name(x["ученик"]).casefold() == norm_name(p.get("ученик", "")).casefold()
+                    and norm_name(x.get("родитель", "")).casefold() == norm_name(p.get("родитель", "")).casefold()
                     and x["сумма"] == parse_amount(p.get("сумма", ""))
                 ]
-            except Exception:  # noqa: BLE001
-                existing = []
+            except Exception as error:  # noqa: BLE001
+                log(f"Не удалось проверить дубли: {type(error).__name__}")
+                await q.edit_message_text(
+                    "Не удалось проверить, записано ли занятие. Попробуйте ещё раз.",
+                    reply_markup=kb([[("Повторить проверку", save_button)], [("Отменить", "cancel")]]))
+                return
             same = [x for x in existing
                     if str(x.get("время", "")) == str(p.get("время", ""))]
             if same:
-                p["force_dup"] = False
+                p["duplicate_confirmation"] = draft_key
                 set_pending(user.id, p)
                 await q.edit_message_text(
                     f"⚠️ Похоже, такое занятие уже записано:\n\n"
@@ -2824,20 +2935,21 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"{p.get('сумма')} ₽\n\n"
                     "Это действительно ещё одно занятие?",
                     reply_markup=kb([
-                        [("✅ Записать всё равно", "save:force")],
+                        [("✅ Записать всё равно", f"save:force:{token}")],
                         [("Отмена", "cancel")]]))
                 return
-        if p.get("чужой"):
-            comm = (p.get("комментарий") or "").strip()
-            p["комментарий"] = (comm + " " if comm else "") + "(чужой ID)"
+        record = {key: value for key, value in p.items()
+                  if key not in ("confirm_token", "duplicate_confirmation")}
+        if record.get("чужой"):
+            comm = (record.get("комментарий") or "").strip()
+            record["комментарий"] = (comm + " " if comm else "") + "(чужой ID)"
         try:
-            row = checks_writer.append_check(p)
+            row = checks_writer.append_check(record)
         except Exception as e:  # noqa: BLE001
-            log(f"Ошибка записи: {e}")
+            log(f"Ошибка записи: {type(e).__name__}")
             await q.edit_message_text(
-                "❌ Не удалось записать в таблицу. Попробуйте ещё раз или напишите организатору.\n"
-                f"{e}",
-                reply_markup=kb([[("Попробовать снова", "save")], [("Отменить", "cancel")]]))
+                "❌ Не удалось подтвердить запись. Проверьте её перед повтором.",
+                reply_markup=kb([[("Попробовать снова", save_button)], [("Отменить", "cancel")]]))
             return
         st = load_state()
         st.setdefault("last_seen_tutor", {})[str(user.id)] = {
@@ -2984,11 +3096,14 @@ def _split_long(text: str, limit: int = LIMIT_TEXT) -> list[str]:
     if len(text) <= limit:
         return [text]
     parts, cur = [], ""
-    for line in text.split("\n"):
-        if len(cur) + len(line) + 1 > limit:
+    for line in text.splitlines(keepends=True):
+        if cur and len(cur) + len(line) > limit:
             parts.append(cur)
             cur = ""
-        cur += line + "\n"
+        while len(line) > limit:
+            parts.append(line[:limit])
+            line = line[limit:]
+        cur += line
     if cur:
         parts.append(cur)
     return parts or [text]
@@ -3036,6 +3151,44 @@ async def _say_one(update: Update, text: str, reply_markup=None,
                     reply_markup=with_home(reply_markup))
 
 
+def _student_from_button(roster: list[dict], key: str) -> dict | None:
+    matches = [student for student in roster if str(student.get("id") or "") == key]
+    if matches:
+        return matches[0] if len(matches) == 1 else None
+    if re.fullmatch(r"[0-9]{1,6}", key):
+        index = int(key)
+        if index < len(roster):
+            return roster[index]
+    return None
+
+
+async def _confirm_schedule_deletion(update, record_id: str) -> None:
+    user_id = update.effective_user.id
+    tutor = name_by_id(user_id)
+    entry = schedule_module.get_entry(record_id, tutor) if tutor and record_id else None
+    if not entry:
+        await update.callback_query.edit_message_text(
+            "Запись недоступна. Откройте расписание заново.",
+            reply_markup=kb([[("К расписанию", "sched:week")]]))
+        return
+    token = secrets.token_urlsafe(9)
+    pending = get_pending(user_id) or {}
+    pending["schedule_delete"] = {"id": record_id, "tutor": tutor, "token": token}
+    set_pending(user_id, pending)
+    await update.callback_query.edit_message_text(
+        "Удалить запись из расписания?",
+        reply_markup=kb([[("Удалить", f"sch:del:yes:{token}")],
+                         [("Отменить", "cancel")]]))
+
+
+def _delete_selected_schedule(user_id: int, record_id: str) -> bool:
+    tutor = name_by_id(user_id)
+    if not tutor or not record_id:
+        return False
+    entry = schedule_module.get_entry(record_id, tutor)
+    return bool(entry and schedule_module.delete_entry(record_id, tutor, entry.get("sh_id", "")))
+
+
 def parse_time(text: str) -> str | None:
     """'17:30' / '1730' / '17.30' / '17' -> 'HH:MM', иначе None."""
     s = str(text).strip().replace(".", ":").replace(" ", "")
@@ -3043,10 +3196,10 @@ def parse_time(text: str) -> str | None:
         return None
     if ":" in s:
         parts = s.split(":")
-        if len(parts) != 2 or not parts[0].isdigit() or not parts[1].isdigit():
+        if len(parts) != 2 or any(not part.isdecimal() or len(part) > 2 for part in parts):
             return None
         hh, mm = int(parts[0]), int(parts[1])
-    elif s.isdigit():
+    elif s.isdecimal():
         if len(s) <= 2:
             hh, mm = int(s), 0
         elif len(s) == 3:
@@ -3126,14 +3279,14 @@ async def ask_amount(update: Update, context: ContextTypes.DEFAULT_TYPE, p: dict
         markup = kb([[("💰 " + price + " ₽", "rate:use")],
                      [("💸 Изменить цену", "rate:change")],
                      [("Отменить", "cancel")]])
-        text = (f"🧒 *{who}*\n\nЦена занятия: *{price} ₽*.\n"
-                "Записать эту сумму?")
+        text = (f"🧒 <b>{html.escape(who)}</b>\n\nЦена занятия: "
+                f"<b>{html.escape(price)} ₽</b>.\nЗаписать эту сумму?")
     else:
         markup = kb(PRESET_AMOUNTS + [[("Ввести своё", "amount:custom")],
                                       [("Отменить", "cancel")]])
-        text = (f"🧒 *{who}*\n\nСколько пришло за занятие?\n"
-                "_Выбранная сумма запомнится как цена ученика._")
-    await _say(update, text, parse_mode=ParseMode.MARKDOWN, reply_markup=markup)
+        text = (f"🧒 <b>{html.escape(who)}</b>\n\nСколько пришло за занятие?\n"
+                "<i>Выбранная сумма запомнится как цена ученика.</i>")
+    await _say(update, text, parse_mode=ParseMode.HTML, reply_markup=markup)
 
 
 def time_suggestions(count: int = 6) -> list[str]:
@@ -3196,34 +3349,53 @@ async def ask_will(update: Update, context: ContextTypes.DEFAULT_TYPE, p: dict):
         parse_mode=ParseMode.MARKDOWN, reply_markup=kb_after_first())
 
 
+def _lesson_draft_key(p: dict) -> str:
+    """Идентификатор текущего черновика для подтверждения возможного дубля."""
+    values = tuple(str(p.get(field) or "").strip()
+                   for field in ("репетитор", "ученик", "родитель", "дата", "время", "сумма"))
+    tutor, student, _, date, time, amount = values
+    if not tutor or not student or parse_amount(amount) is None or (time and not parse_time(time)):
+        return ""
+    try:
+        dt.datetime.strptime(date, "%d.%m.%Y")
+    except ValueError:
+        return ""
+    return hashlib.blake2s(repr(values).encode("utf-8")).hexdigest()
+
+
 async def show_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE, p: dict):
     """Итог: значения по умолчанию, любое можно поправить точечно."""
     user = update.effective_user
+    if not _lesson_draft_key(p):
+        await _say(update, "Запись неполная. Откройте форму занятия заново.",
+                   reply_markup=kb([[("Записать занятие", "new")]]))
+        return
     p["шаг"] = "подтверждение"
+    p["confirm_token"] = secrets.token_urlsafe(9)
+    p.pop("duplicate_confirmation", None)
     set_pending(user.id, p)
     who = p["ученик"] + (f" ({p['родитель']})" if p.get("родитель") else "")
     time_str = p.get("время") or "не указано ⚠️"
     comm = p.get("комиссия")
     text = (
-        "📋 *Проверьте запись:*\n\n"
-        f"👤 {p['репетитор']}\n"
-        f"🧒 {who}\n"
-        f"📅 {p['дата']}   ⏰ {time_str}\n"
-        f"💰 {p['сумма']} ₽\n\n"
-        f"🆕 Первое занятие: {p.get('первое', 'нет')}"
-        + (f" (комиссия {comm} ₽)" if comm else "") + "\n"
-        f"🙂 Как прошло: {p.get('как_прошло', 'Отлично')}\n"
-        f"📈 Будут заниматься: {p.get('будут', 'Да')}\n"
-        f"💬 Комментарий: {p.get('комментарий') or '—'}"
+        "📋 <b>Проверьте запись:</b>\n\n"
+        f"👤 {html.escape(str(p['репетитор']))}\n"
+        f"🧒 {html.escape(who)}\n"
+        f"📅 {html.escape(str(p['дата']))}   ⏰ {html.escape(str(time_str))}\n"
+        f"💰 {html.escape(str(p['сумма']))} ₽\n\n"
+        f"🆕 Первое занятие: {html.escape(str(p.get('первое', 'нет')))}"
+        + (f" (комиссия {html.escape(str(comm))} ₽)" if comm else "") + "\n"
+        f"🙂 Как прошло: {html.escape(str(p.get('как_прошло', 'Отлично')))}\n"
+        f"📈 Будут заниматься: {html.escape(str(p.get('будут', 'Да')))}\n"
+        f"💬 Комментарий: {html.escape(str(p.get('комментарий') or '—'))}"
     )
     markup = kb([
-        [("✅ Всё верно, сохранить", "save")],
+        [("✅ Всё верно, сохранить", f"save:{p['confirm_token']}")],
         [("Первое занятие", "edit:first"), ("Как прошло", "edit:with")],
         [("Будут заниматься", "edit:will"), ("Комментарий", "edit:comment")],
         [("Начать заново", "new"), ("Отменить", "cancel")],
     ])
-    await _say(update, text, parse_mode=ParseMode.MARKDOWN,
-                                                  reply_markup=markup)
+    await _say(update, text, parse_mode=ParseMode.HTML, reply_markup=markup)
 
 
 async def ask_new_student(update: Update, context: ContextTypes.DEFAULT_TYPE, p: dict,
@@ -3324,8 +3496,10 @@ async def _delete_later(context, chat_id: int, message_id: int,
 
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Фото/файлы пока не поддерживаются."""
+    """Фото и файлы пока не поддерживаются."""
     user = update.effective_user
+    if user is None or role_of(user.id) is None:
+        return
     msg = getattr(update, "message", None)
     try:
         if msg is not None:
@@ -3512,12 +3686,17 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await _send(update, "Не понял день или время. Пример: Ср 18:30",
                         parse_mode=ParseMode.MARKDOWN)
             return
-        rid = p.get("edit_id", "")
-        if str(rid).strip():
-            _tut = p.get("репетитор") or name_by_id(user.id) or ""
-            schedule_module.update_entry(str(rid),
-                                         schedule_module.DAY_NAMES[days[0]], t,
-                                         tutor=_tut)
+        rid = str(p.get("edit_id") or "").strip()
+        tutor = name_by_id(user.id) or ""
+        selected = schedule_module.get_entry(rid, tutor) if rid and tutor else None
+        if (not selected or not names_match(p.get("репетитор", ""), tutor)
+                or not schedule_module.update_entry(
+                    rid, schedule_module.DAY_NAMES[days[0]], t,
+                    tutor=tutor, sh_id=selected.get("sh_id", ""))):
+            await _send(update, "Запись не найдена. Откройте расписание заново.",
+                        reply_markup=kb([[("К расписанию", "sched:week")]]))
+            return
+        await _resched_now(context)
         p["шаг"] = "расписание"
         set_pending(user.id, p)
         await _send(update, "✅ Изменено.", reply_markup=kb([[("⬅️ К расписанию", "sch:list")]]))
@@ -3589,8 +3768,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         rd, rt = m.group(1), m.group(2)
         if rd.count(".") == 1:
             rd += f".{dt.date.today().year}"
+        year_format = "%y" if len(rd.rsplit(".", 1)[-1]) == 2 else "%Y"
         try:
-            d = dt.datetime.strptime(rd, "%d.%m.%Y").date()
+            d = dt.datetime.strptime(rd, f"%d.%m.{year_format}").date()
         except ValueError:
             await _send(update, "Не понял дату. Формат: 12.11 18:00")
             return
@@ -3618,8 +3798,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if step == "разовое" and len(text) > 60 and ":" not in text:
         set_pending(user.id, None)
         await _send(update,
-                    "Это сообщение не похоже на разовое занятие — я записал его "
-                    "в журнал и вышел из режима.\n\n"
+                    "Это сообщение не похоже на разовое занятие. Режим закрыт.\n\n"
                     "Если это предложение по боту — «Остальное» → "
                     "«💡 Предложить улучшение».",
                     reply_markup=kb([[("💡 Предложить улучшение", "suggest")],
@@ -3636,8 +3815,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         rd, rt, who = m.group(1), m.group(2), norm_name(m.group(3))
         if rd.count(".") == 1:
             rd += f".{dt.date.today().year}"
+        year_format = "%y" if len(rd.rsplit(".", 1)[-1]) == 2 else "%Y"
         try:
-            d = dt.datetime.strptime(rd, "%d.%m.%Y").date()
+            d = dt.datetime.strptime(rd, f"%d.%m.{year_format}").date()
         except ValueError:
             await _send(update, "Не понял дату. Формат: 12.11 18:00 Полина")
             return
@@ -3811,8 +3991,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if step == "заметка":
         tutor_nm = p.get("репетитор") or name_by_id(user.id) or ""
         try:
-            notes_module.set_note(tutor_nm, text[:2000])
-            log_action(user.id, "изменил заметку", text[:60])
+            if not notes_module.set_note(tutor_nm, text[:2000]):
+                await _send(update, "Не удалось сохранить заметку.")
+                return
+            log_action(user.id, "изменил заметку")
         except Exception as e:  # noqa: BLE001
             log(f"Не смог сохранить заметку: {e}")
             await _send(update, f"❌ Не удалось сохранить заметку: {e}")
@@ -3863,21 +4045,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             link = norm
         row = p.get("row")
-        saved = False
+        field = "student_link" if step == "правка_link_student" else "parent_link"
         if row:
-            if step == "правка_link_student":
-                saved = students_module.update_student_row(
-                    int(row), tutor=tutor, student_link=link)
-            else:
-                saved = students_module.update_student_row(
-                    int(row), tutor=tutor, parent_link=link)
-        if not saved:
-            if step == "правка_link_student":
-                saved = students_module.update_student(
-                    tutor, student, student_link=link, **_where(p))
-            else:
-                saved = students_module.update_student(
-                    tutor, student, parent_link=link, **_where(p))
+            saved = students_module.update_student_row(
+                int(row), tutor=tutor, match_student=student,
+                match_parent=p.get("родитель", ""), **{field: link})
+        else:
+            saved = students_module.update_student(tutor, student, **_where(p), **{field: link})
         set_pending(user.id, None)
         try:
             await _delete_prev(update, context)
@@ -3936,6 +4110,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # --- текст отзыва
     if step == "отзыв_текст":
+        if not text:
+            await _send(update, "Напишите отзыв или пришлите ссылку.")
+            return
         p["отзыв"] = text[:300]
         row = reviews_module.add_review(
             p.get("репетитор") or name_by_id(user.id) or "",
@@ -3955,6 +4132,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await _send(update, "Напишите имя и фамилию репетитора.")
             return
         tutor = p.get("репетитор") or name_by_id(user.id) or ""
+        if not tutor or names_match(tutor, referee):
+            await _send(update, "Укажите имя другого репетитора.")
+            return
+        if referrals_module.has_referral(tutor, referee):
+            await _send(update, "Этот репетитор уже указан в ваших рекомендациях.")
+            return
         referrals_module.add_referral(tutor, referee)
         set_pending(user.id, None)
         await _send(update, track=False, text=
@@ -4140,7 +4323,7 @@ async def show_students_list(update: Update, context: ContextTypes.DEFAULT_TYPE)
     for i, s in enumerate(roster):
         label = s["ученик"] + (f" — {s['родитель']}" if s.get("родитель") else "")
         price = f" · {s['тариф']} ₽" if s.get("тариф") else ""
-        rows.append([(label + price, f"student:{i}")])
+        rows.append([(label + price, f"student:{s.get('id') or i}")])
     if roster:
         lines = []
         for s in roster:
@@ -4494,13 +4677,9 @@ async def send_reminder(context: ContextTypes.DEFAULT_TYPE):
 
 def _sheet_of(lesson_id: str) -> str | None:
     """Лист, где лежит занятие с этим ID (чтобы не тронуть чужую таблицу)."""
-    try:
-        for x in checks_writer.read_lessons():
-            if str(x.get("id") or "") == str(lesson_id):
-                return x.get("лист") or None
-    except Exception:  # noqa: BLE001
-        pass
-    return None
+    matches = [entry for entry in checks_writer.read_lessons()
+               if str(entry.get("id") or "") == str(lesson_id)]
+    return matches[0].get("лист") or None if len(matches) == 1 else None
 
 
 def _occupied_slot(tutor: str, day: dt.date, time_str: str) -> dict | None:
@@ -4884,6 +5063,9 @@ async def cmd_mine(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if role_of(update.effective_user.id) is None:
+        await update.message.reply_text("Нет доступа.")
+        return
     await update.message.reply_text(HELP_TEXT, parse_mode=ParseMode.HTML,
                                     reply_markup=kb([[("Начать", "new")], [("Меню", "menu")]]))
 

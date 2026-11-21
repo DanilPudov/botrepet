@@ -468,7 +468,7 @@ def _parse_sum(value) -> int:
     s = str(value).replace("\u00a0", "").replace(" ", "").replace("₽", "").replace(",", ".")
     try:
         return int(round(float(s)))
-    except ValueError:
+    except (ValueError, OverflowError):
         return 0
 
 
@@ -1169,6 +1169,21 @@ def ensure_ids(sh_id: str, title: str, start_id: int | None = None) -> int:
     return added
 
 
+def read_lessons_for_save(tutor: str) -> list[dict]:
+    """Свежие строки из места записи и архива, если чек мог быть перенесён."""
+    cfg = load_config()["sheets"]
+    target = _target(tutor)
+    sources = [target]
+    if target[0] == cfg["recept"]:
+        sources.append((cfg["history"], cfg["history_sheet"]))
+    lessons = []
+    for book, title in dict.fromkeys(sources):
+        quoted = title.replace("'", "''")
+        values = get_values(book, f"'{quoted}'!A1:L", fresh=True)
+        lessons.extend(_rows_from(book, title, values=values))
+    return lessons
+
+
 def read_lessons(include_history: bool = False,
                  with_checks: bool = False) -> list[dict]:
     """Занятия из всех листов «Истории» (+ «Чеки Репет» при with_checks)."""
@@ -1237,6 +1252,10 @@ def read_lessons(include_history: bool = False,
                 x["лист"] = hist_sheet
                 lessons.append(x)
 
+    archive_sources = (
+        (hist_id, cfg["sheets"]["history_sheet"]),
+        (cfg["sheets"]["recept"], cfg["sheets"]["recept_checks_sheet"]),
+    )
     seen: set[tuple] = set()
     unique: list[dict] = []
     for les in lessons:
@@ -1244,8 +1263,13 @@ def read_lessons(include_history: bool = False,
         # (реальный дубль или два занятия с той же суммой) — это разные
         # занятия, их нельзя склеивать. Без ID — по содержимому.
         lid = str(les.get("id") or "").strip()
-        if lid:
-            dedup_key = (les.get("лист"), lid)
+        source = (les.get("spreadsheet_id"), les.get("sheet_title"))
+        if lid.startswith("AL") and source in archive_sources:
+            dedup_key = ("archived-check", lid, les["дата"], norm_name(les["репетитор"]),
+                         norm_name(les["ученик"]), norm_name(les.get("родитель", "")),
+                         les["сумма"])
+        elif lid:
+            dedup_key = (source, lid)
         else:
             dedup_key = (les["репетитор"], les["дата"],
                          norm_name(les["ученик"]), les["сумма"],
