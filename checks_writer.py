@@ -271,33 +271,75 @@ def find_next_free_row(title: str | None = None,
     return max(last + 1, FIRST_DATA_ROW)
 
 
-def _text_color(sh_id: str) -> dict:
-    """Цвет текста: в личных таблицах (Максим, Вика) — чёрный, иначе белый."""
-    try:
-        import workspaces as _ws
-        for sid in _ws.WORKSPACES.values():
-            if sid == sh_id:
-                return BLACK
-    except Exception:  # noqa: BLE001
-        pass
-    return WHITE
+def _background_color(cell_format: dict, theme_colors: dict) -> dict | None:
+    style = cell_format.get("backgroundColorStyle") or {}
+    if "rgbColor" in style:
+        return style["rgbColor"]
+    color = theme_colors.get(style.get("themeColor"))
+    return color if color is not None else cell_format.get("backgroundColor")
 
 
-def _format_row(sh_id: str, title: str, row: int, paid: bool = False) -> None:
-    """Текст по центру, без фона, тонкие серые границы — как в «Чеках»."""
+def _text_color(background: dict) -> dict:
+    red, green, blue = (background.get(channel, 0) for channel in ("red", "green", "blue"))
+    linear = [v / 12.92 if v <= 0.04045 else ((v + 0.055) / 1.055) ** 2.4
+              for v in (red, green, blue)]
+    luminance = 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+    return BLACK if luminance >= 0.179 else WHITE
+
+
+_TEXT_COLOR_FIELDS = ("userEnteredFormat.textFormat.foregroundColor,"
+                      "userEnteredFormat.textFormat.foregroundColorStyle")
+
+
+def _foreground(color: dict) -> dict:
+    return {"foregroundColor": color, "foregroundColorStyle": {"rgbColor": color}}
+
+
+def _format_row(sh_id: str, title: str, row: int) -> None:
+    """Выбрать контрастный текст для каждой ячейки новой строки."""
     from sheets_util import sheets
-    rng = {"sheetId": None, "startRowIndex": row - 1, "endRowIndex": row,
+
+    api = sheets().spreadsheets()
+    escaped_title = title.replace("'", "''")
+    meta = _exec(api.get(
+        spreadsheetId=sh_id, ranges=[f"'{escaped_title}'!A{row}:L{row}"],
+        fields=("properties(defaultFormat(backgroundColor,backgroundColorStyle),"
+                "spreadsheetTheme(themeColors)),sheets(properties(sheetId,title),"
+                "data(rowData(values(effectiveFormat(backgroundColor,backgroundColorStyle)))))"),
+    ))
+    sheet = next(s for s in meta["sheets"] if s["properties"]["title"] == title)
+    sid = sheet["properties"]["sheetId"]
+    props = meta.get("properties", {})
+    theme_colors = {
+        item["colorType"]: item.get("color", {}).get("rgbColor")
+        for item in props.get("spreadsheetTheme", {}).get("themeColors", [])
+    }
+    default_bg = _background_color(props.get("defaultFormat", {}), theme_colors)
+    if default_bg is None:
+        default_bg = WHITE
+    grid = (sheet.get("data") or [{}])[0]
+    cells = (grid.get("rowData") or [{}])[0].get("values", [])
+    text_formats = []
+    for col in range(len(HEADER)):
+        cell = cells[col] if col < len(cells) else {}
+        background = _background_color(cell.get("effectiveFormat") or {}, theme_colors)
+        color = _text_color(default_bg if background is None else background)
+        text_formats.append({"userEnteredFormat": {"textFormat": _foreground(color)}})
+
+    rng = {"sheetId": sid, "startRowIndex": row - 1, "endRowIndex": row,
            "startColumnIndex": 0, "endColumnIndex": 10}
     requests = [
+        {"updateCells": {
+            "start": {"sheetId": sid, "rowIndex": row - 1, "columnIndex": 0},
+            "rows": [{"values": text_formats}],
+            "fields": _TEXT_COLOR_FIELDS}},
         {"repeatCell": {
             "range": rng,
             "cell": {"userEnteredFormat": {
-                "textFormat": {"foregroundColor": _text_color(sh_id)},
                 "horizontalAlignment": "CENTER",
                 "verticalAlignment": "MIDDLE",
             }},
-            "fields": ("userEnteredFormat.textFormat.foregroundColor,"
-                       "userEnteredFormat.horizontalAlignment,"
+            "fields": ("userEnteredFormat.horizontalAlignment,"
                        "userEnteredFormat.verticalAlignment")}},
         {"repeatCell": {
             "range": {**rng, "startColumnIndex": 0, "endColumnIndex": 1},
@@ -319,20 +361,7 @@ def _format_row(sh_id: str, title: str, row: int, paid: bool = False) -> None:
             "innerVertical": {"style": "SOLID", "width": 1, "color": BORDER},
         }},
     ]
-    if paid:
-        requests.append({"repeatCell": {
-            "range": {**rng, "startColumnIndex": 5, "endColumnIndex": 6},
-            "cell": {"userEnteredFormat": {"textFormat": {"foregroundColor": GREEN}}},
-            "fields": "userEnteredFormat.textFormat.foregroundColor"}})
-    # sheetId нужен для диапазона — выясняем по названию листа
-    meta = sheets().spreadsheets().get(spreadsheetId=sh_id).execute()
-    sid = next(s["properties"]["sheetId"] for s in meta["sheets"]
-               if s["properties"]["title"] == title)
-    for req in requests:
-        req_list = req["repeatCell"]["range"] if "repeatCell" in req else req["updateBorders"]["range"]
-        req_list["sheetId"] = sid
-    sheets().spreadsheets().batchUpdate(
-        spreadsheetId=sh_id, body={"requests": requests}).execute()
+    _exec(api.batchUpdate(spreadsheetId=sh_id, body={"requests": requests}))
 
 
 # Блокировка записи: два одновременных запроса не должны получить один ID
@@ -362,21 +391,13 @@ def append_check(record: dict) -> int:
         row_num = find_next_free_row(title, sh_id)
         lid = next_lesson_id(title, tutor, sh_id, _parse_day(values[0][1]))
         values[0].append(lid)
-        # Устанавливаем статус на пустой строке до записи. При отказе
-        # API повторное подтверждение не создаст второе занятие.
-        _format_row(sh_id, title, row_num, paid=record.get("оплачено") is True)
+        # Сбой оформления пустой строки не создаст дубль при повторе.
+        _format_row(sh_id, title, row_num)
         update_values(sh_id, f"'{title}'!A{row_num}:L{row_num}", values,
                       value_input_option="USER_ENTERED")
         invalidate_cache()
 
     log(f"Занятие записано в строку {row_num}")
-    # цвет имени репетитора, если настроен
-    try:
-        _tcolor = get_tutor_color(tutor)
-        if _tcolor is not None:
-            _color_cell(sh_id, title, row_num, 2, _tcolor)
-    except Exception as e:  # noqa: BLE001
-        log(f"Не смог покрасить имя репетитора: {e}")
     return row_num
 
 
@@ -683,28 +704,6 @@ def get_tutor_color(tutor: str) -> dict | None:
     return parse_color(raw) if raw else None
 
 
-def _color_cell(sh_id: str, sheet_title: str, row: int, column: int,
-                color: dict) -> None:
-    """Покрасить текст одной ячейки (column: 0=A, 2=C, 3=D)."""
-    from sheets_util import sheets
-    sheets().spreadsheets().batchUpdate(
-        spreadsheetId=sh_id,
-        body={"requests": [{
-            "repeatCell": {
-                "range": {
-                    "sheetId": _sheet_gid(sh_id, sheet_title),
-                    "startRowIndex": row - 1,
-                    "endRowIndex": row,
-                    "startColumnIndex": column,
-                    "endColumnIndex": column + 1,
-                },
-                "cell": {"userEnteredFormat": {
-                    "textFormat": {"foregroundColor": color}}},
-                "fields": "userEnteredFormat.textFormat.foregroundColor",
-            }
-        }]}).execute()
-
-
 def apply_tutor_color(tutor: str, color: dict | None = None) -> int:
     """Покрасить имя репетитора (колонка C) во всех его занятиях.
 
@@ -732,8 +731,8 @@ def apply_tutor_color(tutor: str, color: dict | None = None) -> int:
                       "startRowIndex": n - 1, "endRowIndex": n,
                       "startColumnIndex": 2, "endColumnIndex": 3},
             "cell": {"userEnteredFormat": {
-                "textFormat": {"foregroundColor": color}}},
-            "fields": "userEnteredFormat.textFormat.foregroundColor",
+                "textFormat": _foreground(color)}},
+            "fields": _TEXT_COLOR_FIELDS,
         }
     } for n in row_nums[:900]]
     try:
@@ -799,8 +798,8 @@ def set_lesson_paid(lesson_id, paid: bool, title: str | None = None) -> bool:
                     "endColumnIndex": 6,
                 },
                 "cell": {"userEnteredFormat": {
-                    "textFormat": {"foregroundColor": color}}},
-                "fields": "userEnteredFormat.textFormat.foregroundColor",
+                    "textFormat": _foreground(color)}},
+                "fields": _TEXT_COLOR_FIELDS,
             }
         }]}).execute()
     invalidate_cache()

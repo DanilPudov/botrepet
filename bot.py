@@ -1539,7 +1539,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         if action == "ok":
             if role_of(user.id) != OWNER:
-                await q.answer("Оплату подтверждает организатор",
+                await q.answer("Эта кнопка доступна организатору",
                                show_alert=True)
                 return
             await q.answer()
@@ -1560,7 +1560,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "родитель": entry.get("родитель", ""),
                     "сумма": entry["цена"], "комментарий": "по расписанию",
                     "первое": "нет", "как_прошло": "Отлично", "будут": "Да",
-                    "комиссия": "", "оплачено": True,
+                    "комиссия": "",
                 })
             except Exception as e:  # noqa: BLE001
                 log(f"Ошибка записи из напоминания: {e}")
@@ -1579,13 +1579,13 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 log_system("записал занятие по расписанию",
                            f"{entry.get('репетитор','')} — "
                            f"{entry.get('ученик','')} ({date_s})")
-                log_action(user.id, "подтвердил оплату",
+                log_action(user.id, "записал занятие из напоминания",
                            f"{entry.get('репетитор','')} — {entry.get('ученик','')} "
                            f"{entry.get('цена','')} ₽ ({date_s})")
             except Exception as e:  # noqa: BLE001
                 log(f"Запись прошла, но доп. шаг упал: {e}")
             await q.edit_message_text(
-                f"✅ Оплата подтверждена, запись добавлена ({date_s}).")
+                f"✅ Занятие записано ({date_s}). Оплата подтвердится при сверке с выпиской.")
             try:
                 import asyncio as _asyncio
                 await _asyncio.sleep(1)
@@ -1596,7 +1596,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         if action == "was":
             if role_of(user.id) == OWNER:
-                await q.answer("Вы владелец — используйте «Подтвердить оплату»",
+                await q.answer("Эта кнопка для репетитора. Добавьте занятие через меню.",
                                show_alert=True)
                 return
             await q.answer()
@@ -1617,7 +1617,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "родитель": entry.get("родитель", ""),
                     "сумма": entry["цена"], "комментарий": "по расписанию",
                     "первое": "нет", "как_прошло": "Отлично", "будут": "Да",
-                    "комиссия": "", "оплачено": False,
+                    "комиссия": "",
                 })
                 schedule_module.update_last_date(
                     entry["id"],
@@ -4727,10 +4727,9 @@ async def send_lesson_reminder(context: ContextTypes.DEFAULT_TYPE):
             f"🧒 {who}\n"
             f"📅 {date_s}  ⏰ {entry.get('время', '')}\n"
             f"💰 {entry.get('цена', '')} ₽\n\n"
-            + ("Подтвердите оплату или перенесите:"
-               if is_owner_chat else "Отметьте, что занятие было, или перенесите:"))
+            "Отметьте, что занятие было, или перенесите:")
     if is_owner_chat:
-        first_row = [("✅ Подтвердить оплату",
+        first_row = [("✅ Занятие было",
                       f"remind:ok:{entry['id']}:{date_s}")]
     else:
         first_row = [("✅ Занятие было",
