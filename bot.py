@@ -3909,9 +3909,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             log_action(user.id, "изменил цену ученика",
                        f"{tutor} — {student} → {amt} ₽")
         elif step == "правка_parent":
-            students_module.update_student(tutor, student,
-                                           parent=norm_name(text)[:60],
-                                           **_where(p))
+            saved = students_module.update_student(tutor, student,
+                                                   parent=norm_name(text)[:60],
+                                                   **_where(p))
+            if not saved:
+                await _send(update, "Карточка изменилась. Откройте её заново.")
+                return
             log_action(user.id, "изменил родителя",
                        f"{tutor} — {student} → {norm_name(text)[:60]}")
         else:
@@ -3919,8 +3922,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if len(new_name) < 2:
                 await _send(update, "Слишком коротко.")
                 return
-            students_module.update_student(tutor, student,
-                                           new_name=new_name, **_where(p))
+            saved = students_module.update_student(tutor, student,
+                                                   new_name=new_name, **_where(p))
+            if not saved:
+                await _send(update, "Карточка изменилась. Откройте её заново.")
+                return
             log_action(user.id, "переименовал ученика",
                        f"{tutor} — {student} → {new_name}")
         set_pending(user.id, None)
