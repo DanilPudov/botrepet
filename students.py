@@ -321,6 +321,45 @@ def _row_to_dict(row: list[str], row_num: int) -> dict:
     }
 
 
+def _save_student_identity(tutor: str, sh_id: str, row: int, current: dict,
+                           changes: dict[int, str | None]) -> bool:
+    """Обновить карточку и однозначно связанные строки расписания вместе."""
+    import schedule
+
+    def identity(fields) -> tuple[str, ...]:
+        return tuple(norm_name(str(field or "")).casefold() for field in fields)
+
+    previous = identity((tutor, current.get("ученик"), current.get("родитель")))
+    target = f"'{sheet_title()}'!A{row}:{_LAST_COL}{row}"
+    with sheets_util.RECORD_ID_LOCK:
+        roster = _rows(tutor, fresh=True)
+        if row > len(roster) or not previous[1]:
+            return False
+        source = roster[row - 1]
+        if (identity(_cell(source, i) for i in range(3)) != previous
+                or str(_cell(source, I_STUDENT_ID)) != str(current.get("id", ""))):
+            return False
+        # Берём остальные поля из перечитанной карточки.
+        profile = [_cell(source, i) for i in range(10)]
+        for column, value in changes.items():
+            if value is not None:
+                profile[column] = value
+        requests = [{"range": target, "values": [profile]}]
+        matches = sum(identity(_cell(item, i) for i in range(3)) == previous
+                      for item in roster[1:])
+        if matches == 1 and schedule.sheet_for(tutor) == sh_id:
+            entries = sheets_util.get_values(sh_id, f"'{schedule.SHEET}'!A1:I", fresh=True)
+            for line, entry in enumerate(entries[1:], start=2):
+                if _cell(entry, 0) and identity(_cell(entry, i) for i in (1, 2, 3)) == previous:
+                    requests.append({"range": f"'{schedule.SHEET}'!C{line}:D{line}",
+                                     "values": [profile[1:3]]})
+        if len(requests) == 1:
+            sheets_util.update_values(sh_id, target, [profile])
+        else:
+            sheets_util.update_values_batch(sh_id, requests)
+    return True
+
+
 def update_student(tutor: str, student: str, *, new_name: str | None = None,
                    parent: str | None = None, rate: str | None = None,
                    comment: str | None = None,
@@ -373,9 +412,14 @@ def update_student(tutor: str, student: str, *, new_name: str | None = None,
         sender if sender is not None else cur.get("отправитель", ""),
         cur.get("id", ""),
     ]]
-    sheets_util.update_values(
-        sh_id, f"'{sheet_title()}'!A{row}:{_LAST_COL}{row}", values)
-    log(f"УЧЕНИК обновлён строка {row}: {tutor} — {values[0][1]}")
+    if new_name is not None or parent is not None:
+        changes = {1: new_name, 2: parent, 3: rate, 5: comment,
+                   6: student_link, 7: parent_link, 8: sender}
+        if not _save_student_identity(tutor, sh_id, row, cur, changes):
+            return False
+    else:
+        sheets_util.update_values(sh_id, f"'{sheet_title()}'!A{row}:{_LAST_COL}{row}", values)
+    log(f"Карточка ученика обновлена в строке {row}")
     invalidate_students_cache()
     return True
 
