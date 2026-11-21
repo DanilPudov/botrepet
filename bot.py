@@ -14,6 +14,8 @@ import re
 import secrets
 import html
 import sys
+import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -570,10 +572,13 @@ def _already_recorded(tutor: str, date_s: str, time_s: str,
                       student: str, parent: str = "") -> bool:
     """Проверить занятие по репетитору, дате, времени и карточке ученика."""
     day = dt.datetime.strptime(date_s, "%d.%m.%Y").date()
+    slot = schedule_module.parse_time_slot(time_s)
+    if slot is None:
+        return False
     return any(
         names_match(item.get("репетитор", ""), tutor)
         and item.get("дата") == day
-        and str(item.get("время", "")).strip() == str(time_s).strip()
+        and schedule_module.parse_time_slot(item.get("время")) == slot
         and norm_name(item.get("ученик", "")).casefold() == norm_name(student).casefold()
         and norm_name(item.get("родитель", "")).casefold() == norm_name(parent).casefold()
         for item in checks_writer.read_lessons_for_save(tutor)
@@ -4694,9 +4699,49 @@ def _occupied_slot(tutor: str, day: dt.date, time_str: str) -> dict | None:
 REMINDER_GRACE_SECONDS = 60
 
 
-def _reminder_job_name(key: str | None) -> str:
-    token = hashlib.blake2s((key or "").encode("utf-8"), digest_size=12).hexdigest()
-    return f"remind-{token}"
+def _reminder_key(entry: dict, day: dt.date, slot: int) -> str:
+    identity = (
+        _ws.canon_tutor(entry["репетитор"]).casefold(), day.isoformat(), str(slot),
+        norm_name(entry.get("ученик") or "").casefold(),
+        norm_name(entry.get("родитель") or "").casefold(),
+    )
+    return hashlib.sha256(repr(identity).encode("utf-8")).hexdigest()
+
+
+def _legacy_reminder_sent(entry: dict, day: dt.date, reminded: dict) -> bool:
+    tail = f"{entry['id']}-{day:%Y%m%d}"
+    return bool(reminded.get(f"{entry['репетитор']}-{tail}") or reminded.get(tail))
+
+
+def _reminder_db() -> sqlite3.Connection:
+    return sqlite3.connect(sheets_util.DATA_DIR / "reminder_delivery.sqlite3")
+
+
+_REMINDER_SCHEMA = (
+    "CREATE TABLE IF NOT EXISTS deliveries (lesson_key TEXT PRIMARY KEY, day TEXT NOT NULL)"
+)
+
+
+def _claimed_reminders(today: dt.date) -> set[str]:
+    cutoff = (today - dt.timedelta(days=14)).isoformat()
+    with closing(_reminder_db()) as db, db:
+        db.execute(_REMINDER_SCHEMA)
+        db.execute("DELETE FROM deliveries WHERE day < ?", (cutoff,))
+        return {key for (key,) in db.execute("SELECT lesson_key FROM deliveries")}
+
+
+def _claim_reminder(key: str, day: dt.date) -> bool:
+    """Сохранить попытку до отправки, атомарно для всех процессов."""
+    with closing(_reminder_db()) as db, db:
+        db.execute(_REMINDER_SCHEMA)
+        result = db.execute("INSERT OR IGNORE INTO deliveries VALUES (?, ?)",
+                            (key, day.isoformat()))
+        return result.rowcount == 1
+
+
+def _release_reminder(key: str) -> None:
+    with closing(_reminder_db()) as db, db:
+        db.execute("DELETE FROM deliveries WHERE lesson_key = ?", (key,))
 
 
 async def send_lesson_reminder(context: ContextTypes.DEFAULT_TYPE):
@@ -4706,13 +4751,16 @@ async def send_lesson_reminder(context: ContextTypes.DEFAULT_TYPE):
     date_s = data.get("date", "")
     if not snapshot:
         return
-    key = data.get("key")
-    if key and (load_state().get("reminded") or {}).get(key):
-        return
     day = dt.datetime.strptime(date_s, "%d.%m.%Y").date()
+    if day < dt.date.today() - dt.timedelta(days=1):
+        return
+    state = load_state()
+    if _legacy_reminder_sent(snapshot, day, state.get("reminded") or {}):
+        return
     entry = schedule_module.get_entry(snapshot["id"], snapshot["репетитор"])
+    slot = schedule_module.parse_time_slot(snapshot.get("время"))
     if (not entry or schedule_module.next_occurrence(entry, day) != day
-            or entry["время"] != snapshot["время"]
+            or slot is None or schedule_module.parse_time_slot(entry["время"]) != slot
             or schedule_module.is_cancelled(entry["репетитор"], day, entry["время"], strict=True)):
         return
     who = entry.get("ученик", "")
@@ -4720,7 +4768,7 @@ async def send_lesson_reminder(context: ContextTypes.DEFAULT_TYPE):
         who += f" ({entry['родитель']})"
     cfg = load_config()
     chat = int(entry.get("telegram_id") or 0) or data.get("chat_id")
-    if chat is None or int(chat) in load_state().get("revoked_tutor_ids", []):
+    if chat is None or int(chat) in state.get("revoked_tutor_ids", []):
         return
     is_owner_chat = int(chat) in [int(x) for x in cfg.get("owner_ids", [])]
     text = (f"⏰ Занятие прошло?\n\n"
@@ -4734,6 +4782,13 @@ async def send_lesson_reminder(context: ContextTypes.DEFAULT_TYPE):
     else:
         first_row = [("✅ Занятие было",
                       f"remind:was:{entry['id']}:{date_s}")]
+    key = _reminder_key(entry, day, slot)
+    if _already_recorded(entry["репетитор"], date_s, entry["время"],
+                         entry["ученик"], entry.get("родитель", "")):
+        _claim_reminder(key, day)
+        return
+    if not _claim_reminder(key, day):
+        return
     try:
         await context.bot.send_message(
             chat_id=chat,
@@ -4743,25 +4798,26 @@ async def send_lesson_reminder(context: ContextTypes.DEFAULT_TYPE):
                 [("🔁 Перенос", f"remind:move:{entry['id']}:{date_s}"),
                  ("❌ Отмена", f"remind:no:{entry['id']}:{date_s}")],
             ]))
-    except Exception as e:  # noqa: BLE001
-        log(f"Напоминание не доставлено: {type(e).__name__}")
+    except RetryAfter as e:
         attempt = data.get("attempt", 0)
         queue = getattr(context, "job_queue", None)
-        if queue is not None and attempt < 3 and isinstance(e, (NetworkError, RetryAfter)):
-            delay = getattr(e, "retry_after", 60 * (2 ** attempt))
+        # Telegram отклонил запрос из-за лимита, поэтому повтор безопасен.
+        if queue is not None and attempt < 3:
+            delay = e.retry_after
             if isinstance(delay, dt.timedelta):
                 delay = delay.total_seconds()
             queue.run_once(send_lesson_reminder, when=max(1, delay),
                            data={**data, "attempt": attempt + 1},
-                           name=_reminder_job_name(key),
+                           name=f"remind-{key}",
                            job_kwargs={"misfire_grace_time": REMINDER_GRACE_SECONDS})
-        return
-    if key:
-        st = load_state()
-        st.setdefault("reminded", {})[key] = True
-        if len(st["reminded"]) > 300:
-            st["reminded"] = dict(list(st["reminded"].items())[-200:])
-        save_state(st)
+            _release_reminder(key)
+        else:
+            log("Исчерпаны попытки отправки напоминания после ограничения Telegram")
+    except NetworkError as e:
+        # Ответ мог потеряться после доставки. Не отправляем второе сообщение.
+        log(f"Доставка напоминания не подтверждена: {type(e).__name__}")
+    except Exception as e:  # noqa: BLE001
+        log(f"Ошибка отправки напоминания: {type(e).__name__}")
 
 
 async def _resched_now(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -4781,53 +4837,42 @@ async def reschedule_reminders(context: ContextTypes.DEFAULT_TYPE):
     """Разослать напоминания на ближайшие занятия (включая разовые)."""
     now = dt.datetime.now()
     jq = context.job_queue
-    state = load_state()
-    reminded = state.setdefault("reminded", {})
+    reminded = load_state().get("reminded") or {}
+    claimed = _claimed_reminders(now.date())
+    seen = set()
     scheduled = 0
+    occurrences = []
     for entry in schedule_module.all_entries():
-        day = schedule_module.next_occurrence(entry)
-        if not day:
+        day = schedule_module.next_occurrence(entry, now.date())
+        slot = schedule_module.parse_time_slot(entry.get("время"))
+        if not day or slot is None:
             continue
-        key = f"{entry['репетитор']}-{entry['id']}-{day:%Y%m%d}"
-        # старый формат ключа (без репетитора) — чтобы не слать повторно
-        old_key = f"{entry['id']}-{day:%Y%m%d}"
-        if reminded.get(key) or reminded.get(old_key):
+        key = _reminder_key(entry, day, slot)
+        if _legacy_reminder_sent(entry, day, reminded):
+            claimed.add(key)
+        occurrences.append((entry, day, slot, key))
+    for entry, day, slot, key in occurrences:
+        if key in claimed or key in seen:
             continue
-        try:
-            pending_jobs = jq.get_jobs_by_name(_reminder_job_name(key))
-            if any(job.data.get("entry", {}).get("время") == entry["время"]
-                   for job in pending_jobs):
-                continue
-            for job in pending_jobs:
-                job.schedule_removal()
-        except Exception:  # noqa: BLE001
-            pass
-        try:
-            hh, mm = map(int, str(entry.get("время", "")).split(":")[:2])
-        except (ValueError, TypeError):
+        job_name = f"remind-{key}"
+        if jq.get_jobs_by_name(job_name):
             continue
         if hasattr(schedule_module, "is_cancelled") and schedule_module.is_cancelled(
                 entry.get("репетитор", ""), day, str(entry.get("время", ""))):
             continue
-        fire_at = dt.datetime.combine(day, dt.time(hh, mm)) + dt.timedelta(hours=1)
+        fire_at = dt.datetime.combine(day, dt.time.min) + dt.timedelta(minutes=slot + 60)
         if fire_at <= now:
-            _single = schedule_module.one_time_date(str(entry.get("дни", "")))
-            if _single is not None or day == dt.date.today():
-                # занятие уже прошло (сегодня или разовое) — напомним сейчас
-                fire_at = now + dt.timedelta(minutes=1)
-            else:
-                fire_at = dt.datetime.combine(day + dt.timedelta(days=7),
-                                              dt.time(hh, mm)) + dt.timedelta(hours=1)
-                day = day + dt.timedelta(days=7)
-        chat_id = _chat_id_by_tutor(entry["репетитор"])
+            fire_at = now + dt.timedelta(minutes=1)
+        chat_id = int(entry.get("telegram_id") or 0) or _chat_id_by_tutor(entry["репетитор"])
         if not chat_id:
             continue
         jq.run_once(
             send_lesson_reminder, when=fire_at - now,
             data={"entry": entry, "date": day.strftime("%d.%m.%Y"),
-                  "chat_id": chat_id, "key": key},
-            name=_reminder_job_name(key),
+                  "chat_id": chat_id},
+            name=job_name,
             job_kwargs={"misfire_grace_time": REMINDER_GRACE_SECONDS})
+        seen.add(key)
         scheduled += 1
     if scheduled:
         log(f"Напоминаний запланировано: {scheduled}")
