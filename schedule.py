@@ -283,10 +283,20 @@ def one_time_date(value: str) -> dt.date | None:
         return None
 
 
-def entries_for(tutor: str, student: str) -> list[dict]:
-    """Все записи расписания конкретного ученика."""
-    want = norm_name(student)
-    return [e for e in entries_of(tutor) if norm_name(e["ученик"]) == want]
+def is_expired_one_time(entry: dict, today: dt.date) -> bool:
+    day = one_time_date(entry.get("дни", ""))
+    return day is not None and day < today
+
+
+def entries_for(tutor: str, student: str, *, parent: str) -> list[dict]:
+    """Актуальное расписание ученика с учётом имени родителя."""
+    want_student = norm_name(student).casefold()
+    want_parent = norm_name(parent or "").casefold()
+    today = dt.date.today()
+    return [e for e in entries_of(tutor)
+            if norm_name(e["ученик"]).casefold() == want_student
+            and norm_name(e.get("родитель") or "").casefold() == want_parent
+            and not is_expired_one_time(e, today)]
 
 
 def get_entry(entry_id, tutor: str = "") -> dict | None:

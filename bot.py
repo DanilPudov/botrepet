@@ -538,16 +538,10 @@ async def _finish_with_card(update, context, p, done_text):
             pass
 
 
-def _schedule_summary(tutor: str, student: str) -> str:
+def _schedule_summary(tutor: str, student: str, parent: str) -> str:
     """Краткое расписание ученика для шапки карточки."""
     try:
-        entries = schedule_module.entries_for(tutor, student)
-        if not entries:
-            want = norm_name(student)
-            entries = [e for e in schedule_module.entries_of(tutor)
-                       if norm_name(e.get("ученик", "")) == want
-                       or want.startswith(norm_name(e.get("ученик", "")) + " ")
-                       or norm_name(e.get("ученик", "")).startswith(want + " ")]
+        entries = schedule_module.entries_for(tutor, student, parent=parent)
     except Exception:
         return "—"
     if not entries:
@@ -648,16 +642,19 @@ def _card_text(s: dict, sched: str, html_mode: bool = False) -> str:
 
 
 async def show_student_card(update: Update, context: ContextTypes.DEFAULT_TYPE,
-                            tutor: str, student: str) -> None:
+                            tutor: str, student: str, *, parent: str) -> None:
     """Карточка ученика с кнопками правки."""
     user = update.effective_user
-    s = students_module.find_student(
-        tutor, student, parent=(get_pending(user.id) or {}).get("родитель", "")) or {
-        "ученик": student, "родитель": "", "тариф": "", "комментарий": ""}
+    s = students_module.find_student(tutor, student, parent=parent)
+    if s is None:
+        await _say(update, "Карточка не найдена. Выберите ученика из списка.",
+                   reply_markup=kb([[("Мои ученики", "students")]]))
+        return
     set_pending(user.id, {"шаг": "карточка_ученика", "ученик": s["ученик"],
                           "родитель": s.get("родитель", ""),
                           "репетитор": tutor, "row": s.get("row")})
-    text = _card_text(s, _schedule_summary(tutor, s["ученик"]), html_mode=True)
+    text = _card_text(s, _schedule_summary(tutor, s["ученик"], s.get("родитель", "")),
+                      html_mode=True)
     await _say(update, text, parse_mode=ParseMode.HTML, reply_markup=kb([
         [("✏️ Имя ученика", "sedit:name"), ("👤 Родитель", "sedit:parent")],
         [("🔗 Ссылка ученика", "sedit:link_student")],
@@ -676,10 +673,11 @@ async def show_student_schedule(update: Update, context: ContextTypes.DEFAULT_TY
     p = get_pending(user.id) or {}
     tutor = p.get("репетитор") or name_by_id(user.id) or ""
     student = p.get("ученик", "")
-    entries = schedule_module.entries_for(tutor, student) if tutor and student else []
+    parent = p.get("родитель", "")
+    entries = schedule_module.entries_for(tutor, student, parent=parent) if tutor and student else []
     s = students_module.find_student(
-        tutor, student, parent=p.get("родитель", "")) or {
-        "ученик": student, "родитель": "", "тариф": "", "комментарий": ""}
+        tutor, student, parent=parent) or {
+        "ученик": student, "родитель": parent, "тариф": "", "комментарий": ""}
     rows = []
     for e in entries:
         label = f"{e.get('дни', '')} {e.get('время', '')}".strip()
@@ -767,7 +765,9 @@ async def _process_schedule_queue(update, context, p) -> None:
             for e in schedule_module.entries_of(tutor):
                 if (weekday in schedule_module.parse_days(str(e.get("дни", "")))
                         and parse_time(str(e.get("время", ""))) == t
-                        and norm_name(e.get("ученик", "")) == norm_name(student)):
+                        and norm_name(e.get("ученик", "")) == norm_name(student)
+                        and (not parent or norm_name(e.get("родитель") or "").casefold()
+                             == norm_name(parent).casefold())):
                     schedule_module.delete_entry(
                         e["id"], tutor, e.get("sh_id", ""))
                     p["removed"] = int(p.get("removed", 0)) + 1
@@ -794,11 +794,14 @@ async def _process_schedule_queue(update, context, p) -> None:
             return
 
         # слот занят другим занятием?
+        if not parent and len(same) == 1:
+            parent = same[0].get("родитель") or ""
         slot = next((e for e in schedule_module.entries_of(tutor)
                      if weekday in schedule_module.parse_days(str(e.get("дни", "")))
                      and parse_time(str(e.get("время", ""))) == t), None)
         if slot is not None:
-            if norm_name(slot.get("ученик", "")) == norm_name(student):
+            if (norm_name(slot.get("ученик", "")) == norm_name(student)
+                    and norm_name(slot.get("родитель") or "").casefold() == norm_name(parent).casefold()):
                 set_pending(user.id, p)   # такой же — просто оставить
                 continue
             p["resolve"] = {"weekday": weekday, "time": t, "student": student,
@@ -807,8 +810,10 @@ async def _process_schedule_queue(update, context, p) -> None:
             set_pending(user.id, p)
             qmsg = await _send(update,
                         f"⏰ На {schedule_module.DAY_NAMES[weekday]} {t} уже стоит "
-                        f"*{slot.get('ученик', '')}*.\n\n"
-                        f"Поставить *{student}* вместо него?",
+                        f"*{slot.get('ученик', '')}*"
+                        + (f" ({slot['родитель']})" if slot.get("родитель") else "")
+                        + f".\n\nПоставить *{student}*"
+                        + (f" ({parent})" if parent else "") + " вместо него?",
                         parse_mode=ParseMode.MARKDOWN,
                         reply_markup=kb([
                             [("🔁 Только в этот раз", "conf:once")],
@@ -886,18 +891,15 @@ async def schedule_view(user_id: int, days: int) -> tuple[str, list[list[tuple[s
     if not tutor:
         return "Сначала выберите своё имя (/start).", []
 
-    entries = schedule_module.entries_of(tutor)
+    today = dt.date.today()
+    entries = [e for e in schedule_module.entries_of(tutor)
+               if not schedule_module.is_expired_one_time(e, today)]
     names = schedule_module.DAY_NAMES
     _cancels = schedule_module.cancels_for(tutor) if hasattr(schedule_module, "cancels_for") else []
     _cancel_keys = {(c["дата"], schedule_module.parse_time_slot(c["время"]))
                     for c in _cancels}
     weekly: dict[int, list[dict]] = {i: [] for i in range(7)}
-    one_time: list[tuple] = []
     for e in entries:
-        single = schedule_module.one_time_date(str(e.get("дни", "")))
-        if single is not None:
-            one_time.append((single, e))
-            continue
         for d in schedule_module.parse_days(str(e.get("дни", ""))):
             weekly[d].append(e)
 
@@ -921,17 +923,10 @@ async def schedule_view(user_id: int, days: int) -> tuple[str, list[list[tuple[s
         same = [s for s in _students
                 if norm_name(s.get("ученик", "")) == want
                 or names_match(s.get("ученик", ""), name)]
-        if not same:
-            return {}
-        if len(same) == 1:
-            return same[0]
         if parent:
-            wp = norm_name(parent)
-            by_par = [s for s in same
-                      if norm_name(s.get("родитель", "")) == wp]
-            if len(by_par) == 1:
-                return by_par[0]
-        return {}
+            wp = norm_name(parent).casefold()
+            same = [s for s in same if norm_name(s.get("родитель") or "").casefold() == wp]
+        return same[0] if len(same) == 1 else {}
 
     def who_html(e: dict) -> str:
         name = e.get("ученик", "")
@@ -1026,7 +1021,10 @@ async def schedule_view(user_id: int, days: int) -> tuple[str, list[list[tuple[s
                 parts.append(f"  ❌ {tm} {who_html(e)} (отменено)")
             else:
                 parts.append(f"  {tm} {who_html(e)}{price}")
-            rows.append([(f"{tm} {e.get('ученик', '')}"[:38], f"sch:open:{e['id']}")])
+            label = f"{tm} {e.get('ученик', '')}"
+            if e.get("родитель"):
+                label += f" ({e['родитель']})"
+            rows.append([(label[:44], f"sch:open:{e['id']}")])
         _cnt_cancel = sum(
             1 for _k, _o, _e, _s in day_items
             if not _s and (today_d, schedule_module.parse_time_slot(
@@ -1973,7 +1971,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         p = {"шаг": "карточка_ученика", "ученик": s["ученик"],
              "родитель": s.get("родитель", ""), "репетитор": tutor, "row": s.get("row")}
         set_pending(user.id, p)
-        text = _card_text(s, _schedule_summary(tutor, s["ученик"]), html_mode=True)
+        text = _card_text(s, _schedule_summary(tutor, s["ученик"], s.get("родитель", "")),
+                          html_mode=True)
         await q.edit_message_text(text, parse_mode=ParseMode.HTML,
                                   link_preview_options=LinkPreviewOptions(is_disabled=True),
                                   reply_markup=kb([
@@ -2459,7 +2458,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         p = get_pending(user.id) or {}
         await show_student_card(update, context,
                                 p.get("репетитор") or name_by_id(user.id) or "",
-                                p.get("ученик", ""))
+                                p.get("ученик", ""), parent=p.get("родитель", ""))
         return
         return
 
@@ -2470,7 +2469,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         set_pending(user.id, None)
         await show_student_card(update, context,
                                 p.get("репетитор") or name_by_id(user.id) or "",
-                                p.get("ученик", ""))
+                                p.get("ученик", ""), parent=p.get("родитель", ""))
         return
 
     if data == "dup:rename":
@@ -2548,14 +2547,15 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.answer()
         rid = data.split(":")[2]
         entry = schedule_module.get_entry(rid, name_by_id(user.id) or "")
-        if not entry:
+        if not entry or schedule_module.is_expired_one_time(entry, dt.date.today()):
             await show_student_schedule(update, context)
             return
         who = entry.get("ученик", "")
         if entry.get("родитель"):
             who += f" ({entry['родитель']})"
         price = f"\n💰 {entry['цена']} ₽" if entry.get("цена") else ""
-        _sname = entry.get("ученик", "")
+        set_pending(user.id, {"шаг": "расписание", "репетитор": entry["репетитор"],
+                              "ученик": entry["ученик"], "родитель": entry.get("родитель", "")})
         await q.edit_message_text(
             f"⏰ <b>{entry.get('дни', '')} {entry.get('время', '')}</b>\n"
             f"🧒 {who}{price}\n\nЧто сделать?",
@@ -2576,7 +2576,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.answer("Занятие не найдено", show_alert=True)
             return
         tutor = name_by_id(user.id) or ""
-        await show_student_card(update, context, tutor, entry.get("ученик", ""))
+        await show_student_card(update, context, tutor, entry.get("ученик", ""),
+                                parent=entry.get("родитель", ""))
         return
 
     if data.startswith("sch:del:"):
@@ -2604,14 +2605,13 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.answer()
         rid = data.split(":")[2]
         tutor = name_by_id(user.id)
-        if not tutor or not schedule_module.get_entry(rid, tutor):
+        entry = schedule_module.get_entry(rid, tutor) if tutor else None
+        if not entry or schedule_module.is_expired_one_time(entry, dt.date.today()):
             await q.edit_message_text("Запись недоступна. Откройте расписание заново.",
                                       reply_markup=kb([[("К расписанию", "sched:week")]]))
             return
-        p = get_pending(user.id) or {}
-        p["репетитор"] = tutor
-        p["шаг"] = "расписание_правка"
-        p["edit_id"] = rid
+        p = {"репетитор": tutor, "шаг": "расписание_правка", "edit_id": rid,
+             "ученик": entry.get("ученик", ""), "родитель": entry.get("родитель", "")}
         set_pending(user.id, p)
         await q.edit_message_text(
             "Напишите новое день и время, например Ср 18:30.",

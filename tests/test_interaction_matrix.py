@@ -633,3 +633,62 @@ def test_yesterdays_now_button_returns_to_time_selection(aud, actor):
                for row in q.edit_message_text.await_args.kwargs["reply_markup"].inline_keyboard
                for button in row]
     assert "time:now" not in options
+
+
+@pytest.mark.parametrize("student_id,parent,own_slots,other_slots", [
+    ("AP201101", "Рита", ("Чт 18:00", "Вс 10:00"), ("Вс 13:00", "Пн 19:00")),
+    ("AP201102", "Лина", ("Вс 13:00", "Пн 19:00"), ("Чт 18:00", "Вс 10:00")),
+])
+def test_namesakes_have_separate_schedule_screens(aud, monkeypatch, student_id, parent,
+                                                   own_slots, other_slots):
+    uid, tutor = ACTORS["owner"]
+    slots = [("Рита", "Чт", "18:00"), ("Рита", "Вс", "10:00"),
+             ("Лина", "Вс", "13:00"), ("Лина", "Пн", "19:00")]
+    entries = [{"id": str(i), "репетитор": tutor, "ученик": "Алекс", "родитель": p,
+                "дни": day, "время": time}
+               for i, (p, day, time) in enumerate(slots, 1)]
+    bot.schedule_module.entries_of.return_value = entries
+    bot.schedule_module.get_entry.side_effect = lambda rid, tutor: next(
+        (e for e in entries if e["id"] == rid), None)
+    monkeypatch.setattr(bot.students_module, "find_student", lambda tutor, name, parent: next(
+        (s for s in aud.roster if s["ученик"] == name and s["родитель"] == parent), None))
+    say = AsyncMock()
+    monkeypatch.setattr(bot, "_say", say)
+
+    async def run():
+        card = await aud.click(uid, f"student:{student_id}")
+        card_text = card.edit_message_text.await_args.args[0]
+        assert all(slot in card_text for slot in own_slots)
+        assert all(slot not in card_text for slot in other_slots)
+        await aud.click(uid, "sch:list")
+        markup = say.await_args.kwargs["reply_markup"]
+        labels = [b.text for row in markup.inline_keyboard for b in row]
+        assert all(slot in labels for slot in own_slots)
+        assert all(slot not in labels for slot in other_slots)
+
+        other = next(e for e in entries if e["родитель"] != parent)
+        await aud.click(uid, f"sch:card:{other['id']}")
+        opened = say.await_args.args[1]
+        assert other["родитель"] in opened
+        assert all(slot in opened for slot in other_slots)
+        assert bot.get_pending(uid)["родитель"] == other["родитель"]
+
+    asyncio.run(run())
+
+
+def test_expired_single_lesson_is_hidden_in_card_and_week(aud):
+    uid, tutor = ACTORS["owner"]
+    today = dt.date.today()
+    yesterday = today - dt.timedelta(days=1)
+    tomorrow = today + dt.timedelta(days=1)
+    base = {"репетитор": tutor, "ученик": "Алекс", "родитель": "Рита", "цена": "1300"}
+    bot.schedule_module.entries_of.return_value = [
+        {**base, "id": "1", "дни": f"{yesterday:%d.%m.%Y}", "время": "11:00"},
+        {**base, "id": "2", "дни": "Вт", "время": "16:00"},
+        {**base, "id": "3", "дни": f"{today:%d.%m.%Y}", "время": "12:00"},
+        {**base, "id": "4", "дни": f"{tomorrow:%d.%m.%Y}", "время": "13:00"},
+    ]
+    card = bot._schedule_summary(tutor, "Алекс", "Рита")
+    assert "11:00" not in card and all(time in card for time in ["16:00", "12:00", "13:00"])
+    week, _ = asyncio.run(bot.schedule_view(uid, 7))
+    assert "11:00" not in week and "16:00" in week and "12:00" in week
