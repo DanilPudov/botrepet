@@ -615,9 +615,21 @@ def _where(p: dict) -> dict:
             kw["where_row"] = int(row)
         except (TypeError, ValueError):
             pass
-    if p.get("родитель"):
-        kw["match_parent"] = p["родитель"]
+    if "родитель" in p:
+        kw["match_parent"] = p["родитель"] or ""
     return kw
+
+
+def _save_pending_rate(tutor: str, p: dict, amount: int) -> bool:
+    if not tutor or not p.get("ученик"):
+        return False
+    try:
+        return students_module.set_rate(
+            tutor, p["ученик"], str(amount), parent=p.get("родитель"),
+            where_row=p.get("row"))
+    except Exception as error:  # noqa: BLE001
+        log(f"Не удалось сохранить тариф: {type(error).__name__}")
+        return False
 
 
 def _card_text(s: dict, sched: str, html_mode: bool = False) -> str:
@@ -1566,9 +1578,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "комиссия": "",
                 })
             except Exception as e:  # noqa: BLE001
-                log(f"Ошибка записи из напоминания: {e}")
+                log(f"Ошибка записи из напоминания: {type(e).__name__}")
                 await q.edit_message_text(
-                    f"❌ Не удалось записать: {e}\n\n"
+                    "❌ Не удалось записать занятие.\n\n"
                     "Попробуйте ещё раз через минуту.")
                 return
             # Запись уже в таблице: вспомогательные шаги не должны
@@ -1622,17 +1634,20 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "первое": "нет", "как_прошло": "Отлично", "будут": "Да",
                     "комиссия": "",
                 })
+            except Exception as e:  # noqa: BLE001
+                log(f"Ошибка записи «занятие было»: {type(e).__name__}")
+                await q.edit_message_text("❌ Не удалось записать занятие.")
+                return
+            try:
                 schedule_module.update_last_date(
-                    entry["id"],
-                    dt.datetime.strptime(date_s, "%d.%m.%Y").date(),
+                    entry["id"], day,
                     tutor=entry.get("репетитор", ""),
                     sh_id=entry.get("sh_id", ""))
-                await q.edit_message_text(
-                    f"✅ Занятие записано ({date_s}).\n"
-                    "Оплата подтвердится при сверке с выпиской.")
             except Exception as e:  # noqa: BLE001
-                log(f"Ошибка записи «занятие было»: {e}")
-                await q.edit_message_text(f"❌ Не удалось записать: {e}")
+                log(f"Не удалось обновить дату в расписании: {type(e).__name__}")
+            await q.edit_message_text(
+                f"✅ Занятие записано ({date_s}).\n"
+                "Оплата подтвердится при сверке с выпиской.")
             return
 
         if action == "no":
@@ -2488,11 +2503,15 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.answer()
         p = get_pending(user.id) or {}
         val = data.split(":")[2]
+        if p.get("шаг") != "н_цена":
+            await q.edit_message_text("Кнопка устарела. Откройте карточку ученика.")
+            return
         if val != "skip":
-            students_module.set_rate(tutor_of(p, user), p.get("ученик", ""), val,
-                                  parent=p.get("родитель") or None,
-                                  where_row=p.get("row"))
-            p["тариф"] = val
+            amount = parse_amount(val)
+            if amount is None or not _save_pending_rate(tutor_of(p, user), p, amount):
+                await _send(update, "Не удалось сохранить цену. Попробуйте ещё раз.")
+                return
+            p["тариф"] = str(amount)
         p["шаг"] = "н_коммент"
         set_pending(user.id, p)
         await q.edit_message_text(
@@ -2706,14 +2725,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         p["сумма"] = str(amount)
         # цену запоминаем за учеником (если её ещё не было)
-        if not p.get("тариф") and p.get("ученик") and p.get("репетитор"):
-            try:
-                students_module.set_rate(p["репетитор"], p["ученик"], p["сумма"],
-                                  parent=p.get("родитель") or None,
-                                  where_row=p.get("row"))
-                p["тариф"] = p["сумма"]
-            except Exception as e:  # noqa: BLE001
-                log(f"Не смог сохранить цену ученика: {e}")
+        if not p.get("тариф") and _save_pending_rate(tutor_of(p, user), p, amount):
+            p["тариф"] = p["сумма"]
         await ask_time(update, context, p)
         return
 
@@ -3713,15 +3726,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if amt is None:
             await _send(update, "Напишите число, например 1700.")
             return
-        p["тариф"] = str(amt)
-        p["сумма"] = str(amt)
-        if p.get("ученик") and p.get("репетитор"):
-            try:
-                students_module.set_rate(p["репетитор"], p["ученик"], str(amt),
-                                  parent=p.get("родитель") or None,
-                                  where_row=p.get("row"))
-            except Exception as e:  # noqa: BLE001
-                log(f"Не смог сохранить цену: {e}")
+        if not _save_pending_rate(tutor_of(p, user), p, amt):
+            await _send(update, "Не удалось сохранить новый тариф. Попробуйте ещё раз.",
+                        reply_markup=kb([[("Мои ученики", "students")]]))
+            return
+        p["тариф"] = p["сумма"] = str(amt)
         await ask_time(update, context, p)
         return
 
@@ -3904,7 +3913,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if ok:
             await _send(update,
                         f"🎨 Цвет имени изменён. Покрашено строк: {count}.\n"
-                        "Новые записи будут в этом цвете автоматически.",
+                        "Цвет применён к существующим записям.",
                         reply_markup=kb([[("🏠 Домой", "menu")]]))
         else:
             await _send(update,
@@ -3944,9 +3953,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if amt is None:
             await _send(update, "Напишите число, например 1700.")
             return
-        students_module.set_rate(tutor_of(p, user), p.get("ученик", ""), str(amt),
-                                  parent=p.get("родитель") or None,
-                                  where_row=p.get("row"))
+        if not _save_pending_rate(tutor_of(p, user), p, amt):
+            await _send(update, "Не удалось сохранить цену. Попробуйте ещё раз.")
+            return
         p.update({"тариф": str(amt), "шаг": "н_коммент"})
         set_pending(user.id, p)
         await _send(update, "Цена сохранена.\n\nКомментарий: класс, предмет, "
@@ -4017,8 +4026,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         log_action(user.id, "изменил комментарий",
                    f"{_tut_c} — {_stu_c}")
         tutor = p.get("репетитор") or name_by_id(user.id) or ""
-        students_module.update_student(tutor, p.get("ученик", ""),
-                                       comment=text[:300], **_where(p))
+        if not students_module.update_student(tutor, p.get("ученик", ""),
+                                              comment=text[:300], **_where(p)):
+            await _send(update, "Карточка изменилась. Откройте её заново.")
+            return
         set_pending(user.id, None)
         await _send(update, "✅ Комментарий сохранён.",
                     reply_markup=kb([[("⬅️ К ученикам", "students")]]))
@@ -4083,8 +4094,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if amt is None:
                 await _send(update, "Напишите число, например 1700.")
                 return
-            students_module.update_student(tutor, student, rate=str(amt),
-                                           **_where(p))
+            if not _save_pending_rate(tutor, p, amt):
+                await _send(update, "Не удалось обновить цену в карточке и расписании.",
+                            reply_markup=kb([[("Мои ученики", "students")]]))
+                return
             log_action(user.id, "изменил цену ученика",
                        f"{tutor} — {student} → {amt} ₽")
         elif step == "правка_parent":
@@ -4222,6 +4235,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await _send(update, "Не понял сумму. Напишите число, например 1700.")
             return
         p["сумма"] = str(amt)
+        if not p.get("тариф") and _save_pending_rate(tutor_of(p, user), p, amt):
+            p["тариф"] = p["сумма"]
         await ask_time(update, context, p)
         return
 

@@ -287,7 +287,7 @@ _SHEETS_TITLES: dict[str, tuple[float, list[str]]] = {}
 _SHEETS_TTL = 300.0
 
 
-def sheet_titles(sh_id: str, refresh: bool = False) -> list[str]:
+def sheet_titles(sh_id: str, refresh: bool = False, *, strict: bool = False) -> list[str]:
     """Названия листов книги (кэш 5 минут)."""
     import time as _t
     now = _t.time()
@@ -299,6 +299,8 @@ def sheet_titles(sh_id: str, refresh: bool = False) -> list[str]:
         meta = _exec(sheets().spreadsheets().get(spreadsheetId=sh_id))
         titles = [s["properties"]["title"] for s in meta.get("sheets", [])]
     except Exception:
+        if strict:
+            raise
         hit = _SHEETS_TITLES.get(sh_id)
         return hit[1] if hit else []
     _SHEETS_TITLES[sh_id] = (now, titles)

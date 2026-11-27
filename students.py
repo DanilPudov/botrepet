@@ -297,62 +297,64 @@ def _find_row(tutor: str, student: str) -> int | None:
     return found["row"] if found else None
 
 
-def _row_to_dict(row: list[str], row_num: int) -> dict:
-    """Строка листа -> словарь ученика (как в students_of)."""
-    return {
-        "ученик": _cell(row, 1),
-        "родитель": _cell(row, 2),
-        "тариф": _cell(row, 3),
-        "добавлен": _cell(row, 4),
-        "комментарий": _cell(row, 5),
-        "ссылка_ученика": _cell(row, 6),
-        "ссылка_родителя": _cell(row, 7),
-        "отправитель": _cell(row, 8),
-        "id": _cell(row, 9),
-        "row": row_num,
-    }
-
-
-def _save_student_identity(tutor: str, sh_id: str, row: int, current: dict,
-                           changes: dict[int, str | None]) -> bool:
-    """Обновить карточку и однозначно связанные строки расписания вместе."""
+def _save_student_fields(tutor: str, row: int, student: str | None,
+                         parent: str | None, student_id: str | None,
+                         changes: dict[int, str]) -> bool:
+    """Проверить выбранную строку и записать карточку вместе с расписанием."""
     import schedule
 
     def identity(fields) -> tuple[str, ...]:
         return tuple(norm_name(str(field or "")).casefold() for field in fields)
 
-    previous = identity((tutor, current.get("ученик"), current.get("родитель")))
-    target = f"'{sheet_title()}'!A{row}:{_LAST_COL}{row}"
+    sh_id = workspaces.spreadsheet_for(tutor)
+    title = sheet_title().replace("'", "''")
     with sheets_util.RECORD_ID_LOCK:
         roster = _rows(tutor, fresh=True)
-        if row > len(roster) or not previous[1]:
+        if not 2 <= row <= len(roster):
             return False
         source = roster[row - 1]
-        if (identity(_cell(source, i) for i in range(3)) != previous
-                or str(_cell(source, I_STUDENT_ID)) != str(current.get("id", ""))):
+        previous = identity(_cell(source, i) for i in range(3))
+        if (not names_match(_cell(source, 0), tutor) or not previous[1]
+                or (student is not None and previous[1] != identity((student,))[0])
+                or (parent is not None and previous[2] != identity((parent,))[0])
+                or (student_id and _cell(source, I_STUDENT_ID) != student_id)):
             return False
-        # Берём остальные поля из перечитанной карточки.
-        profile = [_cell(source, i) for i in range(10)]
+        requests = []
         for column, value in changes.items():
-            if value is not None:
-                profile[column] = value
-        requests = [{"range": target, "values": [profile]}]
-        matches = sum(identity(_cell(item, i) for i in range(3)) == previous
-                      for item in roster[1:])
-        if matches == 1 and schedule.sheet_for(tutor) == sh_id:
+            requests.append({"range": f"'{title}'!{chr(65 + column)}{row}", "values": [[value]]})
+
+        sync = changes.keys() & {1, 2, 3}
+        if sync and (schedule.sheet_for(tutor) != sh_id or sum(
+                identity(_cell(item, i) for i in range(3)) == previous
+                for item in roster[1:]) != 1):
+            return False
+        if sync and schedule.SHEET in sheets_util.sheet_titles(sh_id, refresh=True, strict=True):
             entries = sheets_util.get_values(sh_id, f"'{schedule.SHEET}'!A1:I", fresh=True)
+            today = dt.date.today()
             for line, entry in enumerate(entries[1:], start=2):
-                if _cell(entry, 0) and identity(_cell(entry, i) for i in (1, 2, 3)) == previous:
-                    requests.append({"range": f"'{schedule.SHEET}'!C{line}:D{line}",
-                                     "values": [profile[1:3]]})
+                if not _cell(entry, 0) or identity(_cell(entry, i) for i in (1, 2, 3)) != previous:
+                    continue
+                for column, letter in ((1, "C"), (2, "D"), (3, "G")):
+                    if column not in sync:
+                        continue
+                    if column == 3:
+                        active = str(_cell(entry, 7)).strip().casefold() not in {"0", "нет", "false"}
+                        day = schedule.one_time_date(_cell(entry, 4))
+                        if not active or (day is not None and (
+                                day < today or _cell(entry, 6) != _cell(source, 3))):
+                            continue
+                    requests.append({"range": f"'{schedule.SHEET}'!{letter}{line}",
+                                     "values": [[changes[column]]]})
         if len(requests) == 1:
-            sheets_util.update_values(sh_id, target, [profile])
-        else:
+            sheets_util.update_values(sh_id, requests[0]["range"], requests[0]["values"])
+        elif requests:
             sheets_util.update_values_batch(sh_id, requests)
+        sheets_util.invalidate_values_cache()
+    invalidate_students_cache()
     return True
 
 
-def update_student(tutor: str, student: str, *, new_name: str | None = None,
+def update_student(tutor: str, student: str | None, *, new_name: str | None = None,
                    parent: str | None = None, rate: str | None = None,
                    comment: str | None = None,
                    student_link: str | None = None,
@@ -365,54 +367,27 @@ def update_student(tutor: str, student: str, *, new_name: str | None = None,
     where_row — точная строка из карточки (надёжнее поиска по имени).
     match_parent — родитель для различения одинаковых имён.
     """
-    if where_row:
-        try:
-            row = int(where_row)
-        except (TypeError, ValueError):
-            row = None
-    else:
-        row = None
-    if row is None:
-        found = find_student(tutor, student, parent=match_parent)
+    student_id = None
+    if where_row is None:
+        found = find_student(tutor, student or "", parent=match_parent)
         if not found:
             return False
         row = found["row"]
-    cfg = load_config()
-    sh_id = workspaces.spreadsheet_for(tutor)
-    # ВАЖНО: при тёзках find_student по имени вернёт None и мы затрём
-    # остальные поля пустыми. Поэтому берём данные из ТОЙ ЖЕ строки.
-    cur = find_student(tutor, student, parent=match_parent)
-    if not cur or cur.get("row") != row:
-        cur = {}
-        try:
-            rows = _rows(tutor)
-            if 2 <= row <= len(rows):
-                cur = _row_to_dict(rows[row - 1], row)
-        except Exception:  # noqa: BLE001
-            pass
-    values = [[
-        tutor,
-        new_name if new_name is not None else cur.get("ученик", ""),
-        parent if parent is not None else cur.get("родитель", ""),
-        rate if rate is not None else cur.get("тариф", ""),
-        cur.get("добавлен", ""),
-        comment if comment is not None else cur.get("комментарий", ""),
-        (student_link if student_link is not None
-         else cur.get("ссылка_ученика", "")),
-        (parent_link if parent_link is not None
-         else cur.get("ссылка_родителя", "")),
-        sender if sender is not None else cur.get("отправитель", ""),
-        cur.get("id", ""),
-    ]]
-    if new_name is not None or parent is not None:
-        changes = {1: new_name, 2: parent, 3: rate, 5: comment,
-                   6: student_link, 7: parent_link, 8: sender}
-        if not _save_student_identity(tutor, sh_id, row, cur, changes):
-            return False
+        student = found["ученик"]
+        if match_parent is None:
+            match_parent = found.get("родитель") or ""
+        student_id = found.get("id")
     else:
-        sheets_util.update_values(sh_id, f"'{sheet_title()}'!A{row}:{_LAST_COL}{row}", values)
+        try:
+            row = int(where_row)
+        except (TypeError, ValueError):
+            return False
+    changes = {1: new_name, 2: parent, 3: rate, 5: comment,
+               6: student_link, 7: parent_link, 8: sender}
+    if not _save_student_fields(tutor, row, student, match_parent, student_id,
+                                {k: v for k, v in changes.items() if v is not None}):
+        return False
     log(f"Карточка ученика обновлена в строке {row}")
-    invalidate_students_cache()
     return True
 
 
@@ -421,48 +396,13 @@ def update_student(tutor: str, student: str, *, new_name: str | None = None,
 def update_student_row(row: int, tutor: str = "", *, match_student: str | None = None,
                        match_parent: str | None = None, **fields) -> bool:
     """Обновить ученика в строке, если это всё ещё выбранная карточка."""
-    sh_id = workspaces.spreadsheet_for(tutor)
-    try:
-        rows = _rows(tutor, fresh=True)
-    except Exception:  # noqa: BLE001
-        return False
-    if row < 2 or row > len(rows):
-        return False
-    cur_row = rows[row - 1]
-    if (not names_match(_cell(cur_row, 0), tutor)
-            or (match_student is not None and
-                norm_name(_cell(cur_row, 1)).casefold() != norm_name(match_student).casefold())
-            or (match_parent is not None and
-                norm_name(_cell(cur_row, 2)).casefold() != norm_name(match_parent).casefold())):
-        return False
-    name = fields.get("new_name") if fields.get("new_name") is not None \
-        else _cell(cur_row, 1)
-    parent = fields.get("parent") if fields.get("parent") is not None \
-        else _cell(cur_row, 2)
-    values = [[
-        _cell(cur_row, 0),
-        name,
-        parent,
-        fields["rate"] if fields.get("rate") is not None else _cell(cur_row, 3),
-        _cell(cur_row, 4),
-        fields["comment"] if fields.get("comment") is not None else _cell(cur_row, 5),
-        fields["student_link"] if fields.get("student_link") is not None else _cell(cur_row, 6),
-        fields["parent_link"] if fields.get("parent_link") is not None else _cell(cur_row, 7),
-        fields["sender"] if fields.get("sender") is not None else _cell(cur_row, 8),
-        _cell(cur_row, I_STUDENT_ID),
-    ]]
-    sheets_util.update_values(
-        sh_id, f"'{sheet_title()}'!A{row}:{_LAST_COL}{row}", values)
-    log(f"УЧЕНИК обновлён по строке {row}: {name}")
-    invalidate_students_cache()
-    return True
+    return update_student(tutor, match_student, where_row=row, match_parent=match_parent, **fields)
 
 
 def set_rate(tutor: str, student: str, rate: str,
              parent: str | None = None,
              where_row: int | None = None) -> bool:
     """Сохранить цену. parent/where_row обязательны при тёзках."""
-    invalidate_students_cache()
     return update_student(tutor, student, rate=str(rate),
                           match_parent=parent, where_row=where_row)
 

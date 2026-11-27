@@ -692,3 +692,36 @@ def test_expired_single_lesson_is_hidden_in_card_and_week(aud):
     assert "11:00" not in card and all(time in card for time in ["16:00", "12:00", "13:00"])
     week, _ = asyncio.run(bot.schedule_view(uid, 7))
     assert "11:00" not in week and "16:00" in week and "12:00" in week
+
+
+@pytest.mark.parametrize("failure", [None, False, TimeoutError("simulated")])
+def test_rate_editor_reports_only_successful_write(aud, failure):
+    uid, tutor = ACTORS["owner"]
+    bot.set_pending(uid, {"шаг": "правка_rate", "репетитор": tutor, "ученик": "Алекс",
+                          "родитель": "Лина", "row": 3})
+    save_rate = bot.students_module.set_rate
+    if isinstance(failure, Exception):
+        save_rate.side_effect = failure
+    else:
+        save_rate.return_value = failure is None
+    asyncio.run(aud.type(uid, "1500"))
+    save_rate.assert_called_once_with(tutor, "Алекс", "1500", parent="Лина", where_row=3)
+    messages = [args.args[1] for args in aud.send.await_args_list if len(args.args) > 1]
+    assert any("✅ Сохранено" in message for message in messages) == (failure is None)
+    assert any("Не удалось обновить цену" in message for message in messages) == (failure is not None)
+
+
+def test_reminder_reports_success_when_only_schedule_marker_fails(aud, monkeypatch):
+    uid, tutor = ACTORS["tutor"]
+    day = dt.date.today()
+    entry = {"id": "AS201101", "репетитор": tutor, "ученик": "Алекс",
+             "родитель": "Лина", "дни": f"{day:%d.%m.%Y}", "время": "18:00",
+             "цена": "1500", "telegram_id": uid}
+    monkeypatch.setattr(bot.schedule_module, "all_entries", lambda: [entry])
+    monkeypatch.setattr(bot.schedule_module, "is_cancelled", lambda *a, **kw: False)
+    monkeypatch.setattr(bot.schedule_module, "update_last_date",
+                        Mock(side_effect=TimeoutError("simulated")))
+    q = asyncio.run(aud.click(uid, f"remind:was:{entry['id']}:{day:%d.%m.%Y}"))
+    aud.append.assert_called_once()
+    assert aud.append.call_args.args[0]["сумма"] == "1500"
+    assert "Занятие записано" in q.edit_message_text.await_args.args[0]
